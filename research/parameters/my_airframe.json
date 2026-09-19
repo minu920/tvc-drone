@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "profile": "my_airframe_draft",
+  "description": "User aircraft draft. No measured hardware parameters yet. No inheritance from upstream_reference.json.",
+  "frames": {
+    "world": "NED",
+    "body": "FRD",
+    "rotation": "R_ned_from_frd",
+    "tvc_order": "Rx(alpha) @ Ry(beta) @ [0, 0, -1]"
+  },
+  "parameters": {
+    "mass": {"value": null, "unit": "kg", "status": "unknown", "source": "Weigh the complete flight configuration, including battery, sensors and wiring."},
+    "gravity": {"value": 9.81, "unit": "m/s^2", "status": "convention", "source": "Initial local-gravity convention for offline research; not a measurement."},
+    "tvc_arm": {"value": null, "unit": "m", "status": "unknown", "source": "Locate CoM and effective TVC pivot; current model requires pivot at [0,0,+arm] in FRD."},
+    "inertia_xx": {"value": null, "unit": "kg*m^2", "status": "unknown", "source": "Obtain inertia about CoM from mass-checked CAD or an identification experiment."},
+    "inertia_yy": {"value": null, "unit": "kg*m^2", "status": "unknown", "source": "Obtain inertia about CoM; do not assume equality with Ixx without checking."},
+    "inertia_zz": {"value": null, "unit": "kg*m^2", "status": "unknown", "source": "Obtain inertia about CoM; do not copy Ixx or Iyy."},
+    "yaw_accel_per_legacy_mass_equivalent": {"value": null, "unit": "rad/s^2/kg_equiv", "status": "unknown", "source": "Legacy-reference field only. Not needed by the new aircraft roll study; do not copy the upstream yaw fit."},
+    "yaw_torque_per_differential_thrust": {"value": null, "unit": "m", "status": "unknown", "source": "Identify signed reaction torque per differential thrust, with explicit motor numbering and spin directions."},
+    "max_total_thrust": {"value": null, "unit": "N", "status": "unknown", "source": "Measure the complete coaxial assembly at minimum operating voltage using a protected remotely stopped test stand."},
+    "tvc_angle_limit": {"value": null, "unit": "rad", "status": "unknown", "source": "Check collision-free actual gimbal output travel, not servo shaft travel; begin with propellers removed."},
+    "servo_rate_limit": {"value": null, "unit": "rad/s", "status": "unknown", "source": "Identify actual gimbal output rate under representative load; document voltage and linkage."},
+    "servo_design_time_constant": {"value": null, "unit": "s", "status": "unknown", "source": "Select from an identified actuator response, or label an explicit simulation hypothesis as assumed."},
+    "lqi_sample_period": {"value": null, "unit": "s", "status": "unknown", "source": "Select the future control period after architecture and timing review; legacy LQI remains reference-only."},
+    "actuator_study_sample_period": {"value": null, "unit": "s", "status": "unknown", "source": "Choose an explicit offline experiment sample period; this does not configure a flight scheduler."}
+  }
+}

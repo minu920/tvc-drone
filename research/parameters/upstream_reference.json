@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "profile": "upstream_reference_not_flight_calibrated",
+  "upstream_commit": "5cff917900f27b2e5b21c164b132abaccfa6da86",
+  "frames": {
+    "world": "NED",
+    "body": "FRD",
+    "rotation": "R_ned_from_frd",
+    "tvc_order": "Rx(alpha) @ Ry(beta) @ [0, 0, -1]"
+  },
+  "parameters": {
+    "mass": {"value": 0.430, "unit": "kg", "status": "upstream_reference", "source": "apps/python/lqr_compute.py:mass"},
+    "gravity": {"value": 9.81, "unit": "m/s^2", "status": "convention", "source": "Upstream G; also used for legacy mass-equivalent thrust conversion, not exact standard kgf."},
+    "tvc_arm": {"value": 0.205, "unit": "m", "status": "upstream_reference", "source": "apps/python/lqr_compute.py:arm; research assumes pivot at [0,0,+arm] from CoM in FRD."},
+    "inertia_xx": {"value": 0.01802468421, "unit": "kg*m^2", "status": "upstream_reference", "source": "apps/python/lqr_compute.py:I_xx"},
+    "inertia_yy": {"value": 0.01802468421, "unit": "kg*m^2", "status": "upstream_reference", "source": "apps/python/lqr_compute.py:I_yy"},
+    "inertia_zz": {"value": null, "unit": "kg*m^2", "status": "unknown", "source": "Need CAD or measurement; do not substitute Ixx."},
+    "yaw_accel_per_legacy_mass_equivalent": {"value": 0.392, "unit": "rad/s^2/kg_equiv", "status": "upstream_reference", "source": "apps/python/lqr_compute.py:B_rz_aero; legacy semantics need bench verification."},
+    "yaw_torque_per_differential_thrust": {"value": null, "unit": "m", "status": "unknown", "source": "Nm/N; rotor reaction torque coefficient has not been identified."},
+    "max_total_thrust": {"value": null, "unit": "N", "status": "unknown", "source": "Measure coaxial assembly at minimum operating battery voltage."},
+    "tvc_angle_limit": {"value": 0.149066, "unit": "rad", "status": "upstream_reference", "source": "apps/python/lqr_compute.py:u_max[0]; research limit, not verified mechanical stop."},
+    "servo_rate_limit": {"value": 3.141592653589793, "unit": "rad/s", "status": "assumed", "source": "Illustrative gimbal output speed, not MG90S specification or measurement."},
+    "servo_design_time_constant": {"value": 0.040, "unit": "s", "status": "assumed", "source": "Initial actuator study only."},
+    "lqi_sample_period": {"value": 0.010, "unit": "s", "status": "upstream_reference", "source": "apps/python/lqr_compute.py:dt"},
+    "actuator_study_sample_period": {"value": 0.020, "unit": "s", "status": "assumed", "source": "Both one-axis example controllers run at 50 Hz; not a firmware scheduler model."}
+  },
+  "upstream_lqi_cost": {
+    "q_diagonal": [130.0, 130.0, 25.0, 15.0, 4.0, 4.0, 0.00001, 0.1, 10.0, 10.0, 0.1, 0.01],
+    "r_legacy_diagonal": [100.0, 100.0, 17500.0, 5.0],
+    "source": "apps/python/lqr_compute.py:Q12,R; input cost must transform when input units change."
+  }
+}
