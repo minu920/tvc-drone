@@ -16,6 +16,7 @@
 .\.venv\Scripts\python.exe research/model_check.py
 .\.venv\Scripts\python.exe -m unittest discover -s research -p 'test_*.py' -v
 .\.venv\Scripts\python.exe research/actuator_study.py --profile research/parameters/upstream_reference.json
+.\.venv\Scripts\python.exe research/propulsion_check.py --output artifacts/propulsion
 .\.venv\Scripts\python.exe research/gcs_smoke.py
 .\.venv\Scripts\python.exe -m pip check
 ```
@@ -54,6 +55,13 @@ python3 -m venv .venv
   위 시간은 원본 프로파일 기준이다. `--profile`로 입력을 선택하고 `--output`으로 실험 폴더를 분리한다.
   입력이 부족한 내 기체 프로파일은 실행을 중단한다. 결과에는 실행 당시 값과 SHA-256을 보존한다.
 - `test_actuator_study.py`: 설계 극점, 유한한 상태값, 각도/속도 제한, 지연 큐, 잘못된 입력 검사.
+- `parameters/propulsion_candidate.json`, `propulsion_check.py`: 동축 추진계 후보를 제조사 공표
+  정지추력표로 서류 판정. APC의 계열별 RPM 상한, 부하 RPM 추정, 동축 손실 가정에 따른 추력·T/W·질량
+  상한을 계산하고 `artifacts/propulsion/`에 기록한다. 공표 데이터 범위 밖은 외삽하지 않고 중단한다.
+  전류·체공시간은 계산하지 않는다. 측정된 모터 효율 곡선이 필요하며 이 저장소에는 없다.
+  `--strict`는 최저 운용 전압에서 목표를 만족하지 못하면 종료 코드 2를 낸다.
+- `test_propulsion_check.py`: 표 값 재현, 외삽 거부, 미정값 거부, 계열별 상한, 손실 민감도 단조성 검사.
+  12×3.8SF가 이 속도에서 상한을 넘는다는 사실을 회귀 시험으로 고정한다.
 - `gcs_smoke.py`: Qt 화면 두 개 생성과 경로 보간만 검사. 시리얼을 열지 않으며 화면도 표시하지 않는다.
 - `build_stm32.ps1`: 기존 STM32CubeIDE로 새 복사본을 빌드. 원본 프로젝트와 이전 결과를 덮어쓰지 않는다.
   실행: `powershell -File research/build_stm32.ps1`. 보드에 업로드하지 않는다.

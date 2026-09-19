@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "candidate": "coaxial_4s_12in_mr",
+  "description": "Coaxial propulsion candidate for the research airframe. Manufacturer tables and design targets only. Nothing here was measured on the built aircraft.",
+  "propulsion": {
+    "battery_cells": {
+      "value": 4,
+      "unit": "count",
+      "status": "selected",
+      "source": "4S LiPo selected for this candidate."
+    },
+    "cell_voltage_nominal": {
+      "value": 3.7,
+      "unit": "V",
+      "status": "convention",
+      "source": "LiPo nominal cell voltage convention, not a measurement."
+    },
+    "cell_voltage_min_operating": {
+      "value": 3.5,
+      "unit": "V",
+      "status": "assumed",
+      "source": "Lower operating limit assumption. Replace with the pack datasheet limit and the sag measured at hover current."
+    },
+    "motor_kv": {
+      "value": 650,
+      "unit": "rpm/V",
+      "status": "manufacturer",
+      "source": "D4215-21 650KV nameplate. Not verified on a dynamometer; KV tolerance and winding differences are not included."
+    },
+    "motor_count": {
+      "value": 2,
+      "unit": "count",
+      "status": "selected",
+      "source": "Coaxial counter-rotating pair, each motor independently driven."
+    },
+    "propeller": {
+      "value": "12x4.5MR",
+      "unit": "designation",
+      "status": "selected",
+      "source": "APC multi-rotor series, standard rotation. Paired with 12x4.5MRP for the reverse-rotation position."
+    },
+    "loaded_rpm_fraction": {
+      "value": 0.8,
+      "unit": "ratio",
+      "status": "assumed",
+      "source": "Loaded speed as a fraction of the no-load KV product. Assumption only; replace with measured RPM from ESC telemetry or an optical tachometer."
+    },
+    "coaxial_thrust_loss": {
+      "value": 0.2,
+      "unit": "ratio",
+      "status": "assumed",
+      "source": "Momentum theory gives 20.6 percent as the fully interfering upper bound at equal power. Real partially immersed stacks lose less. Replace with a measurement from the protected coaxial stand, recording rotor spacing and what was held constant."
+    },
+    "target_mass": {
+      "value": 1.5,
+      "unit": "kg",
+      "status": "selected",
+      "source": "Design ceiling for the complete flight configuration, decided 2026-09-20. Not a weighed mass."
+    },
+    "thrust_to_weight_goal": {
+      "value": 1.7,
+      "unit": "ratio",
+      "status": "selected",
+      "source": "Relaxed from 2.0 on 2026-09-20 to keep the 1.5 kg ceiling with this propulsion set. A design choice for this research airframe, not a general safety standard."
+    },
+    "tvc_tilt_limit": {
+      "value": 0.2618,
+      "unit": "rad",
+      "status": "selected",
+      "source": "15 degrees of mechanical gimbal travel, used to size the vertical thrust component. Initial commanded travel stays at 8 degrees."
+    }
+  }
+}
