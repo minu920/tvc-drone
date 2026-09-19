@@ -1,0 +1,6 @@
+-r requirements-research.txt
+PyQt5==5.15.11
+pyqtgraph==0.13.7
+qasync==0.27.1
+pyserial==3.5
+pyserial-asyncio==0.6

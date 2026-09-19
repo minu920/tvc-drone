@@ -56,3 +56,12 @@ dkms.conf
 
 # macOS
 .DS_Store
+
+# Local research environments and generated results
+.venv/
+.build/
+artifacts/
+__pycache__/
+.pytest_cache/
+.platformio/
+gcs-firmware/.pio/
