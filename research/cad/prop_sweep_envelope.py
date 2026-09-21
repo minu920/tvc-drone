@@ -72,6 +72,71 @@ def envelope_profile(radius, spacing, thickness, tilt_deg, pivot_offset, margin,
     return profile
 
 
+def _disc_angle_intervals(radius, rho, z_lo, z_hi):
+    """Polar angles at which a rotor disc has material on the circle of radius rho.
+
+    The disc occupies r in [0, radius], z in [z_lo, z_hi] in the half-plane about the pivot.
+    Intersecting it with a circle of radius rho gives the angles measured from +z.
+    """
+    if rho <= 1e-9:
+        return []
+    lo = max(-1.0, min(1.0, z_lo / rho))
+    hi = max(-1.0, min(1.0, z_hi / rho))
+    if z_lo > rho or z_hi < -rho:
+        return []
+    a, b = math.acos(min(hi, 1.0)), math.acos(max(lo, -1.0))
+    if b <= a:
+        return []
+    if rho <= radius:
+        return [(a, b)]
+    lim = math.asin(max(-1.0, min(1.0, radius / rho)))
+    out = []
+    for s, e in ((a, min(b, lim)), (max(a, math.pi - lim), b)):
+        if e > s:
+            out.append((s, e))
+    return out
+
+
+def point_in_sweep(point_rz, radius, spacing, thickness, tilt_deg, pivot_offset):
+    """Exact test: can either rotor reach this (r, z) point at any tilt within the limit?
+
+    The revolved solid deliberately fills the notch near the axis, which is conservative for
+    a keep-out body but wrong for clearance checks on anything that lives near the axis, such
+    as the airframe itself. This works from the rotor geometry instead.
+    """
+    r, z = point_rz
+    rho = math.hypot(r, z)
+    if rho <= 1e-9:
+        return False
+    psi = math.atan2(r, z)
+    tilt = math.radians(tilt_deg)
+    for sign in (+1, -1):
+        centre = sign * spacing / 2.0 - pivot_offset
+        for a, b in _disc_angle_intervals(radius, rho, centre - thickness / 2.0,
+                                          centre + thickness / 2.0):
+            if a - tilt <= psi <= b + tilt:
+                return True
+    return False
+
+
+def sweep_clearance(point_rz, radius, spacing, thickness, tilt_deg, pivot_offset, step=0.5):
+    """Signed radial distance from a point to the swept volume; negative means inside."""
+    r, z = point_rz
+    if point_in_sweep(point_rz, radius, spacing, thickness, tilt_deg, pivot_offset):
+        d = 0.0
+        while d < 400.0:
+            d += step
+            if not point_in_sweep((r + d, z), radius, spacing, thickness, tilt_deg, pivot_offset):
+                return -d
+        return -400.0
+    d = 0.0
+    while d < 400.0:
+        d += step
+        if point_in_sweep((max(r - d, 0.0), z), radius, spacing, thickness, tilt_deg, pivot_offset):
+            return d
+    return 400.0
+
+
 def build_solid(profile, tol=1e-6):
     """Revolve the (r, z) profile about the Z axis, dropping the degenerate edges.
 

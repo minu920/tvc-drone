@@ -93,13 +93,15 @@ def build_fin(body_radius, root_chord, tip_chord, span, sweep, thickness, z_root
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--body-od", type=float, default=110.0, help="Electronics bay outer diameter, mm")
-    p.add_argument("--body-length", type=float, default=380.0, help="Cylindrical bay length, mm")
+    p.add_argument("--body-od", type=float, default=90.0, help="Electronics bay outer diameter, mm")
+    p.add_argument("--body-length", type=float, default=320.0, help="Cylindrical bay length, mm")
     p.add_argument("--nose-length", type=float, default=150.0)
     p.add_argument("--skirt-height", type=float, default=70.0)
-    p.add_argument("--skirt-bottom-od", type=float, default=72.0,
-                   help="Opening the gimbal passes through, mm")
-    p.add_argument("--wall", type=float, default=2.0)
+    p.add_argument("--skirt-bottom-od", type=float, default=78.0,
+                   help="Opening the cradle swings through, mm")
+    p.add_argument("--wall", type=float, default=1.2)
+    p.add_argument("--z-origin", type=float, default=-20.0,
+                   help="Skirt bottom in gimbal coordinates, where z=0 is the pivot")
     p.add_argument("--fins", type=int, default=4, help="Fin count; 0 disables fins")
     p.add_argument("--fin-span", type=float, default=55.0)
     p.add_argument("--fin-root-chord", type=float, default=120.0)
@@ -115,7 +117,9 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     br, wall = args.body_od / 2.0, args.wall
-    z_skirt, z_body = 0.0, args.skirt_height
+    # Shared frame with the gimbal: z = 0 is the pivot, so the shell is offset.
+    z_skirt = args.z_origin
+    z_body = z_skirt + args.skirt_height
 
     battery = None
     if args.battery:
