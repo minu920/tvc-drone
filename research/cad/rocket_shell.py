@@ -109,11 +109,30 @@ def main(argv=None):
     p.add_argument("--hatch-width", type=float, default=60.0,
                    help="Access opening width, mm; 0 disables it")
     p.add_argument("--hatch-height", type=float, default=150.0)
+    p.add_argument("--battery", type=str, default="137x44x33",
+                   help="Battery LxWxH in mm, checked against the bay. Empty string skips the check.")
     p.add_argument("--output", type=Path, default=Path("artifacts/cad"))
     args = p.parse_args(argv)
 
     br, wall = args.body_od / 2.0, args.wall
     z_skirt, z_body = 0.0, args.skirt_height
+
+    battery = None
+    if args.battery:
+        try:
+            L, W, H = (float(v) for v in args.battery.lower().split("x"))
+        except ValueError:
+            p.error("--battery must be LxWxH in mm, for example 137x44x33.")
+        bay_id = args.body_od - 2 * wall
+        # The pack lies along the axis; its cross-section must clear the bay bore.
+        diagonal = math.hypot(W, H)
+        battery = {"size_mm": [L, W, H], "bay_bore_mm": bay_id,
+                   "cross_section_diagonal_mm": diagonal,
+                   "radial_clearance_mm": (bay_id - diagonal) / 2.0,
+                   "width_clearance_each_side_mm": (bay_id - W) / 2.0,
+                   "fits_bore": diagonal <= bay_id,
+                   "fits_length": L <= args.body_length,
+                   "bay_length_spare_mm": args.body_length - L}
     z_nose = z_body + args.body_length
     total = args.skirt_height + args.body_length + args.nose_length
 
@@ -149,6 +168,8 @@ def main(argv=None):
                   "No fastener bosses, bulkhead seats, vents or wiring pass-throughs yet.",
                   "Fin size is chosen for the rocket form, not from an aerodynamic requirement.",
               ], "offline_only": True}
+    if battery is not None:
+        report["battery_fit"] = battery
 
     for name, wp in parts.items():
         vol = wp.val().Volume()
@@ -186,6 +207,16 @@ def main(argv=None):
               f"{m['ASA']:7.1f} {m['PA-CF']:8.1f}   {d['bbox_mm']}")
     if args.fins > 0:
         print(f"  note: fin volume above is for ONE fin; {args.fins} are fitted.")
+    if battery is not None:
+        b = battery
+        print(f"  battery {b['size_mm']} mm in a {b['bay_bore_mm']:.1f} mm bore:")
+        print(f"    cross-section diagonal {b['cross_section_diagonal_mm']:.1f} mm -> "
+              f"radial clearance {b['radial_clearance_mm']:.1f} mm  "
+              f"({'fits' if b['fits_bore'] else 'DOES NOT FIT'})")
+        print(f"    beside the pack: {b['width_clearance_each_side_mm']:.1f} mm each side for "
+              f"ESCs and wiring")
+        print(f"    bay length spare {b['bay_length_spare_mm']:.0f} mm  "
+              f"({'fits' if b['fits_length'] else 'TOO SHORT'})")
     print(f"  wrote STEP/STL per part plus assembled to {args.output.resolve()}")
     print("Exterior skin only. Solid wall, no infill assumption; slicer settings will change mass.")
     return 0
