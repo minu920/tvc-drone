@@ -17,6 +17,7 @@
 .\.venv\Scripts\python.exe -m unittest discover -s research -p 'test_*.py' -v
 .\.venv\Scripts\python.exe research/actuator_study.py --profile research/parameters/upstream_reference.json
 .\.venv\Scripts\python.exe research/propulsion_check.py --output artifacts/propulsion
+.\.venv\Scripts\python.exe research/pid_attitude.py --profile research/parameters/upstream_reference.json --output artifacts/pid-attitude
 .\.venv\Scripts\python.exe research/gcs_smoke.py
 .\.venv\Scripts\python.exe -m pip check
 ```
@@ -62,6 +63,12 @@ python3 -m venv .venv
   `--strict`는 최저 운용 전압에서 목표를 만족하지 못하면 종료 코드 2를 낸다.
 - `test_propulsion_check.py`: 표 값 재현, 외삽 거부, 미정값 거부, 계열별 상한, 손실 민감도 단조성 검사.
   12×3.8SF가 이 속도에서 상한을 넘는다는 사실을 회귀 시험으로 고정한다.
+- `pid_attitude.py`, `test_pid_attitude.py`: 원본 내부 루프 LQI를 대체하는 종속 PID 자세 제어기와
+  TVC 할당. 할당식은 `tvc_model.body_wrench`의 정확한 역변환이며, 왕복 시험으로 고정한다.
+  원본 `pid_t`의 규약(적분 상태 클램프, 측정값 미분, 미분 필터, 외부 anti-windup)을 그대로 따라
+  게인이 펌웨어로 그대로 넘어간다. 요는 닫지 않는다 — 차동추력 계수가 미측정이며 단독 모터
+  데이터로 구할 수 없으므로 요청 시 오류를 낸다. `Izz`도 요구하지 않는다: 요 각속도를 0으로 두면
+  자이로 항의 롤·피치 성분이 사라진다.
 - `gcs_smoke.py`: Qt 화면 두 개 생성과 경로 보간만 검사. 시리얼을 열지 않으며 화면도 표시하지 않는다.
 - `build_stm32.ps1`: 기존 STM32CubeIDE로 새 복사본을 빌드. 원본 프로젝트와 이전 결과를 덮어쓰지 않는다.
   실행: `powershell -File research/build_stm32.ps1`. 보드에 업로드하지 않는다.
