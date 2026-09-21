@@ -69,19 +69,42 @@ def body_bracket(rod_dia, wall, socket_len, angle_deg, plate_l, plate_w, plate_t
         bore.translate((0, 0, plate_t - 0.1)))
 
 
-def knee(rod_dia, wall, socket_len, angle_a, angle_c, hub_dia):
-    """Joins the two inboard struts to the vertical leg."""
+def knee(rod_dia, wall, socket_len, angle_a, angle_c, hub_dia, web_t=5.0, fillet=2.0):
+    """Joins the two inboard struts to the vertical leg, with a web across the truss plane.
+
+    This joint reacts the moment from the vertical leg, so three sockets meeting at a ball
+    is the wrong shape for it: the load path runs through the thinnest section. A web filling
+    the triangle between the three rod axes carries that moment in shear instead, and all
+    three axes are coplanar here so one flat web does it.
+    """
+    angles = sorted([180 - angle_a, 180 - angle_c, 0.0])
     hub = cq.Workplane("XY").sphere(hub_dia / 2)
-    bosses, bores = [], []
-    for ang in (180 - angle_a, 180 - angle_c, 0.0):
-        b, r = _rod_socket(rod_dia, wall, socket_len, ang)
-        bosses.append(b)
-        bores.append(r)
     solid = hub
-    for b in bosses:
+    bores, tips = [], []
+    for ang in angles:
+        b, r = _rod_socket(rod_dia, wall, socket_len, ang)
         solid = solid.union(b)
+        bores.append(r)
+        a = math.radians(ang)
+        tips.append((socket_len * math.sin(a), socket_len * math.cos(a)))
+
+    # Web across the plane containing all three rod axes, built as a fan from the hub out
+    # to each socket tip. The tips are visited in order of socket angle, not in order of
+    # their polar position: the three axes span less than a half turn, so the triangle of
+    # tips does not contain the hub and joining them directly leaves the middle hollow.
+    web = (cq.Workplane("XZ").polyline([(0.0, 0.0)] + tips).close()
+           .extrude(web_t / 2, both=True))
+    solid = solid.union(web)
     for r in bores:
         solid = solid.cut(r)
+    before = solid.val().Volume()
+    try:
+        filleted = solid.edges("|Y").fillet(fillet)
+        # A fillet that removes a large fraction has selected the wrong edges.
+        if filleted.val().Volume() > before * 0.85:
+            solid = filleted
+    except Exception:
+        pass
     return solid
 
 
@@ -112,6 +135,8 @@ def main(argv=None):
     p.add_argument("--disc-thickness", type=float, default=20.0)
     p.add_argument("--per-axis-deg", type=float, default=15.0)
     p.add_argument("--min-margin", type=float, default=10.0)
+    p.add_argument("--knee-web-t", type=float, default=5.0,
+                   help="Gusset thickness across the truss plane, mm")
     p.add_argument("--output", type=Path, default=Path("artifacts/cad"))
     args = p.parse_args(argv)
 
@@ -144,7 +169,7 @@ def main(argv=None):
         "leg-bracket-lower": body_bracket(args.rod_dia, args.wall, args.socket_len,
                                           angle_c, 44.0, 26.0, 4.0, 30.0),
         "leg-knee": knee(args.rod_dia, args.wall, args.socket_len, angle_a, angle_c,
-                         args.rod_dia + 2 * args.wall + 6.0),
+                         args.rod_dia + 2 * args.wall + 6.0, args.knee_web_t),
         "leg-foot": foot(args.rod_dia, args.wall, args.socket_len, 30.0, 5.0),
     }
 
@@ -160,8 +185,9 @@ def main(argv=None):
               "strut_checks": checks, "all_struts_clear": not fouled,
               "rod_total_length_mm": args.legs * sum(c["length_mm"] for c in checks.values()),
               "parts": {}, "not_analysed": [
-                  "Landing loads, rod buckling and knee bending are not calculated. "
-                  "The knee reacts a moment and is the weakest joint in this layout.",
+                  "Landing loads and rod buckling are not calculated. The knee now "
+                  "has a web across the truss plane, but its size is not from a "
+                  "stress result.",
                   "Clearance is to the rod centreline; half the rod diameter still comes off it.",
               ], "offline_only": True}
 

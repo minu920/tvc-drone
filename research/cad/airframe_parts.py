@@ -22,6 +22,7 @@ from pathlib import Path
 
 import cadquery as cq
 
+import features as F
 import prop_sweep_envelope as env
 
 DENSITY = {"PLA": 1.24, "PETG": 1.27, "ABS": 1.04, "ASA": 1.07, "PA-CF": 1.10}
@@ -58,16 +59,46 @@ def check_leg(attach, foot, spacing, thickness, tilt_deg, pivot_offset, samples=
 
 
 def bulkhead(outer_dia, thickness, bore, spine_bcd, spine_holes, spine_dia,
-             mount_bcd, mount_holes):
-    ring = (cq.Workplane("XY").circle(outer_dia / 2).circle(bore / 2).extrude(thickness))
+             mount_bcd, mount_holes, insert_bcd, insert_count, flange_width,
+             flange_thickness, wire_dia, wire_count):
+    """Universal bay ring: carries the spine, takes the gimbal and leg brackets, passes wires.
+
+    One part serves all four stations. Inserts rather than tapped plastic, because the
+    gimbal and legs come off repeatedly. Notches at the split plane clear the shell's
+    internal bolting flanges, without which the bulkhead cannot drop into a closed half.
+    """
+    ring = cq.Workplane("XY").circle(outer_dia / 2).circle(bore / 2).extrude(thickness)
+
+    # Insert bosses stand proud of the ring so there is wall around each insert.
+    for i in range(insert_count):
+        a = 2 * math.pi * i / insert_count + math.pi / insert_count
+        ring = ring.union(F.insert_boss(height=F.INSERT_M3["depth"] + 1.5)
+                          .translate((insert_bcd / 2 * math.cos(a),
+                                      insert_bcd / 2 * math.sin(a), 0)))
+
     cut = cq.Workplane("XY")
     for i in range(spine_holes):
         a = 2 * math.pi * i / spine_holes + math.pi / spine_holes
-        cut = cut.moveTo(spine_bcd / 2 * math.cos(a), spine_bcd / 2 * math.sin(a)).circle(spine_dia / 2)
+        cut = cut.moveTo(spine_bcd / 2 * math.cos(a),
+                         spine_bcd / 2 * math.sin(a)).circle(spine_dia / 2)
     for i in range(mount_holes):
         a = 2 * math.pi * i / mount_holes
-        cut = cut.moveTo(mount_bcd / 2 * math.cos(a), mount_bcd / 2 * math.sin(a)).circle(M3_CLEARANCE / 2)
-    return ring.cut(cut.extrude(thickness * 3, both=True))
+        cut = cut.moveTo(mount_bcd / 2 * math.cos(a),
+                         mount_bcd / 2 * math.sin(a)).circle(M3_CLEARANCE / 2)
+    for i in range(wire_count):
+        a = 2 * math.pi * i / wire_count + 0.4
+        cut = cut.moveTo((bore / 2 + outer_dia / 2) / 2 * math.cos(a),
+                         (bore / 2 + outer_dia / 2) / 2 * math.sin(a)).circle(wire_dia / 2)
+    ring = ring.cut(cut.extrude(thickness * 6, both=True))
+
+    # Clearance for the shell split flanges at the split plane.
+    notch = (cq.Workplane("XY")
+             .rect(outer_dia, 2 * flange_thickness + 0.6)
+             .extrude(thickness * 6, both=True)
+             .intersect(cq.Workplane("XY").circle(outer_dia / 2)
+                        .circle(outer_dia / 2 - flange_width - 0.4)
+                        .extrude(thickness * 6, both=True)))
+    return ring.cut(notch)
 
 
 def battery_tray(pack_l, pack_w, pack_h, wall, body_bore, strap_width):
@@ -136,6 +167,13 @@ def main(argv=None):
     p.add_argument("--pack", type=str, default="137x44x33")
     p.add_argument("--tray-wall", type=float, default=2.4)
     p.add_argument("--strap-width", type=float, default=16.0)
+    p.add_argument("--insert-bcd", type=float, default=62.0,
+                   help="Bolt circle for the heat-set inserts the legs and gimbal use")
+    p.add_argument("--insert-count", type=int, default=6)
+    p.add_argument("--flange-width", type=float, default=8.0)
+    p.add_argument("--flange-thickness", type=float, default=3.0)
+    p.add_argument("--wire-dia", type=float, default=9.0)
+    p.add_argument("--wire-count", type=int, default=3)
     p.add_argument("--leg-count", type=int, default=4)
     p.add_argument("--leg-rod-dia", type=float, default=8.2)
     p.add_argument("--leg-attach-r", type=float, default=43.0)
@@ -165,7 +203,9 @@ def main(argv=None):
     parts = {
         "bulkhead": bulkhead(body_bore - 0.4, args.bulkhead_thickness, args.bulkhead_bore,
                              args.spine_bcd, args.spine_holes, args.spine_dia,
-                             args.gimbal_bcd, 6),
+                             args.gimbal_bcd, 6, args.insert_bcd, args.insert_count,
+                             args.flange_width, args.flange_thickness,
+                             args.wire_dia, args.wire_count),
         "battery-tray": battery_tray(L, W, H, args.tray_wall, body_bore - 0.6, args.strap_width),
     }
     counts = {"bulkhead": 4, "battery-tray": 1}
@@ -180,6 +220,10 @@ def main(argv=None):
                   "ground_clearance_mm": env_bottom - args.leg_foot_z,
                   "min_strut_to_envelope_mm": gap, "worst_case_z_mm": gap_z,
                   "clears_envelope": gap > 0},
+              "fasteners": {
+                  "insert": "M3 heat-set, 4.0 mm pilot hole, 6.7 mm deep, 8 mm boss",
+                  "shell_interface": "notched at the split plane to clear the shell flanges",
+                  "wire": "round pass-throughs; a slot would concentrate stress"},
               "parts": {}, "assumptions": [
                   "Strut clearance is measured to the rod centreline, so half the rod "
                   "diameter plus any ball-link hardware still has to come off it.",

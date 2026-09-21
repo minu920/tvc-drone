@@ -25,6 +25,8 @@ from pathlib import Path
 
 import cadquery as cq
 
+import features as F
+
 # Filament densities in g/cm^3, for the print-mass estimate only.
 DENSITY = {"PLA": 1.24, "PETG": 1.27, "ABS": 1.04, "ASA": 1.07, "PA-CF": 1.10}
 
@@ -64,6 +66,47 @@ def build_nose(base_radius, length, wall, z_base):
     inner = [(r, z_base + inner_len - x) for x, r in ogive_profile(max(base_radius - wall, wall), inner_len)]
     inner = [(0.0, z_base + inner_len)] + [p for p in inner if p[0] > 1e-6] + [(base_radius - wall, z_base)]
     return _revolve(outer).cut(_revolve(inner + [(0.0, z_base)]))
+
+
+def bulkhead_ledges(radius, wall, stations, ledge_w, ledge_h):
+    """Internal shoulders the bulkheads seat against.
+
+    A 1.2 mm wall has nothing for a bulkhead to register on, and reaching inside a 320 mm
+    tube to fit one is not possible once it is closed. The shoulders locate each bulkhead
+    axially and the split halves then capture it radially, so nothing has to be glued.
+    """
+    ledges = None
+    for z in stations:
+        ring = (cq.Workplane("XY").workplane(offset=z)
+                .circle(radius - wall).circle(radius - wall - ledge_w)
+                .extrude(ledge_h))
+        ledges = ring if ledges is None else ledges.union(ring)
+    return ledges
+
+
+def split_flanges(radius, wall, z_from, z_to, flange_w, flange_t, bolt_pitch, sign):
+    """Internal flange along one side of the split plane, with bolt holes across it.
+
+    Each half carries a flange that butts against the other at the split plane, so the two
+    bolt to each other without any feature breaking the outer surface.
+    """
+    length = z_to - z_from
+    strip = (cq.Workplane("XZ").workplane(offset=0.0)
+             .rect(2 * (radius - wall), length, centered=(True, False))
+             .extrude(sign * flange_t)
+             .translate((0, 0, z_from)))
+    keep = (cq.Workplane("XY").workplane(offset=z_from)
+            .circle(radius - wall).circle(radius - wall - flange_w)
+            .extrude(length))
+    flange = strip.intersect(keep)
+    holes = cq.Workplane("XZ")
+    n = max(int(length / bolt_pitch), 2)
+    for i in range(n):
+        z = z_from + length * (i + 0.5) / n
+        for sx in (-1, 1):
+            holes = holes.moveTo(sx * (radius - wall - flange_w / 2), z).circle(
+                F.M3_CLEARANCE / 2)
+    return flange.cut(holes.extrude(-3 * flange_t).translate((0, 2 * flange_t, 0)))
 
 
 def build_body(radius, length, wall, z_base):
@@ -111,6 +154,19 @@ def main(argv=None):
     p.add_argument("--hatch-width", type=float, default=60.0,
                    help="Access opening width, mm; 0 disables it")
     p.add_argument("--hatch-height", type=float, default=150.0)
+    p.add_argument("--split", action="store_true", default=True,
+                   help="Produce two half shells with internal bolting flanges")
+    p.add_argument("--no-split", dest="split", action="store_false")
+    p.add_argument("--ledge-width", type=float, default=3.0)
+    p.add_argument("--ledge-height", type=float, default=2.5)
+    p.add_argument("--flange-width", type=float, default=8.0)
+    p.add_argument("--flange-thickness", type=float, default=3.0)
+    p.add_argument("--flange-bolt-pitch", type=float, default=55.0)
+    p.add_argument("--vent-count", type=int, default=8)
+    p.add_argument("--vent-width", type=float, default=5.0)
+    p.add_argument("--vent-height", type=float, default=22.0)
+    p.add_argument("--wire-hole", type=float, default=9.0)
+    p.add_argument("--wire-count", type=int, default=3)
     p.add_argument("--battery", type=str, default="137x44x33",
                    help="Battery LxWxH in mm, checked against the bay. Empty string skips the check.")
     p.add_argument("--output", type=Path, default=Path("artifacts/cad"))
@@ -150,12 +206,48 @@ def main(argv=None):
                         args.fin_sweep, args.fin_thickness / 2.0, z_body + 10.0)
         parts["fin"] = fin
 
+    # Bulkhead seats: four stations spread along the bay, matching the reference build.
+    stations = [z_body + args.body_length * f for f in (0.04, 0.34, 0.64, 0.93)]
+    parts["body"] = parts["body"].union(
+        bulkhead_ledges(br, wall, stations, args.ledge_width, args.ledge_height))
+
+    # Cooling: an inlet ring high in the bay and an outlet ring low, where the rotor
+    # inflow pulls a slight depression. Raked so a vertical wall prints them unsupported.
+    for z_frac, count in ((0.86, args.vent_count), (0.10, args.vent_count)):
+        parts["body"] = parts["body"].cut(
+            F.louver_slots(count, br, z_body + args.body_length * z_frac,
+                           args.vent_width, args.vent_height, wall * 4))
+    # Motor and servo wiring leaves the bay through the skirt, not through a vent.
+    parts["skirt"] = parts["skirt"].cut(
+        F.grommet_hole(args.wire_hole, args.wire_count, br - 4.0,
+                       z_skirt + args.skirt_height * 0.55))
+
     if args.hatch_width > 0:
         hatch = (cq.Workplane("XY").workplane(offset=z_body + args.body_length * 0.35)
                  .box(args.body_od, args.hatch_width, args.hatch_height, centered=(True, True, False)))
         parts["body"] = parts["body"].cut(hatch)
 
-    assembled = parts["skirt"].union(parts["body"]).union(parts["nose"])
+    if args.split:
+        full = parts.pop("body")
+        for sign, name in ((+1, "body-half-a"), (-1, "body-half-b")):
+            half = full.intersect(cq.Workplane("XY").workplane(offset=z_body - 5)
+                                  .rect(4 * args.body_od, 2 * args.body_od,
+                                        centered=(True, False))
+                                  .extrude(args.body_length + 10)
+                                  .mirror("XZ") if sign < 0 else
+                                  cq.Workplane("XY").workplane(offset=z_body - 5)
+                                  .rect(4 * args.body_od, 2 * args.body_od,
+                                        centered=(True, False))
+                                  .extrude(args.body_length + 10))
+            half = half.union(split_flanges(br, wall, z_body + 2, z_nose - 2,
+                                            args.flange_width, args.flange_thickness,
+                                            args.flange_bolt_pitch, sign))
+            parts[name] = half
+
+    assembled = parts["skirt"].union(parts["nose"])
+    for name in ("body", "body-half-a", "body-half-b"):
+        if name in parts:
+            assembled = assembled.union(parts[name])
     if args.fins > 0:
         for i in range(args.fins):
             assembled = assembled.union(parts["fin"].rotate((0, 0, 0), (0, 0, 1), 360.0 * i / args.fins))
@@ -165,6 +257,13 @@ def main(argv=None):
                          "nose_z": [z_nose, z_nose + args.nose_length],
                          "total_length_mm": total, "body_od_mm": args.body_od,
                          "wall_mm": wall, "fin_count": args.fins},
+              "assembly": {
+                  "split": "two half shells with internal M3 flanges" if True else "",
+                  "bulkhead_seats": "four internal shoulders",
+                  "vents": "two raked louver rings, inlet high and outlet low",
+                  "wire_exits": "grommet holes through the skirt",
+                  "fastener": "M3 clearance through the flange into heat-set inserts "
+                              "in the opposite half"},
               "parts": {}, "assumptions": [
                   "Body diameter and length are design choices, not derived from measured "
                   "battery, flight controller or ESC dimensions.",

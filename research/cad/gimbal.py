@@ -39,6 +39,8 @@ from pathlib import Path
 
 import cadquery as cq
 
+import features as F
+
 DENSITY = {"PLA": 1.24, "PETG": 1.27, "ABS": 1.04, "ASA": 1.07, "PA-CF": 1.10}
 
 MOTOR_OD = 42.25
@@ -67,30 +69,54 @@ def _rot_z(shape, axis):
     return shape.rotate((0, 0, 0), (0, 0, 1), 90) if axis == "Y" else shape
 
 
-def _axis_boss(solid, axis, outer_dia, boss_dia):
-    """Local thickening along one axis so a bearing pocket has material around it."""
-    cyl = (cq.Workplane("YZ").workplane(offset=-outer_dia / 2)
-           .circle(boss_dia / 2).extrude(outer_dia))
-    return solid.union(_rot_z(cyl, axis))
+def _axis_boss(solid, axis, inner_dia, outer_dia, boss_dia, overhang=2.0):
+    """Local thickening on one axis so a bearing seat has material around it.
+
+    Only the annulus is thickened, plus a small overhang past the bore. Extruding a
+    cylinder across the full diameter instead would leave a bar straight through the ring,
+    blocking whatever is meant to pivot inside it.
+    """
+    for s in (+1, -1):
+        start = s * (inner_dia / 2 - overhang)
+        length = s * ((outer_dia - inner_dia) / 2 + overhang)
+        cyl = (cq.Workplane("YZ").workplane(offset=start)
+               .circle(boss_dia / 2).extrude(length))
+        solid = solid.union(_rot_z(cyl, axis))
+    return solid
 
 
-def _bore_axis(solid, axis, bearing_od, bearing_width, pin_dia, outer_dia):
-    """Bearing pockets from both outer faces of one axis, plus a through pin bore."""
-    pin = (cq.Workplane("YZ").workplane(offset=-outer_dia)
-           .circle(pin_dia / 2 + 0.25).extrude(2 * outer_dia))
-    pocket = (cq.Workplane("YZ").workplane(offset=outer_dia / 2 - bearing_width)
-              .circle(bearing_od / 2).extrude(bearing_width + 0.5))
-    pocket = pocket.union(pocket.mirror("YZ"))
-    return solid.cut(_rot_z(pin, axis)).cut(_rot_z(pocket, axis))
+def _bore_axis(solid, axis, outer_dia, bearing=F.BEARING_683):
+    """Bearing seats cut inward from each outer face, with a shoulder and a lead-in.
+
+    The shoulder gives the outer race a face to sit against so the press fit is not the
+    only thing locating it axially, and the chamfered mouth stops the bearing shaving the
+    bore on the way in.
+    """
+    cutter = F.bearing_pocket_cutter(bearing)
+    for s in (+1, -1):
+        # The cutter eats material below its own -Z, so rotate that direction inward.
+        c = cutter.rotate((0, 0, 0), (0, 1, 0), 90 * s).translate((s * outer_dia / 2, 0, 0))
+        solid = solid.cut(_rot_z(c, axis))
+    return solid
 
 
-def _trunnions(solid, axis, start_dia, reach, boss_dia, pin_dia):
+def _trunnions(solid, axis, start_dia, reach, boss_dia, spec=F.INSERT_M3):
+    """Stub shafts on one axis, each with a heat-set insert in its end face.
+
+    An M3 screw runs from outside through the bearing bore and threads into the insert, so
+    the same screw is the pivot pin and sets the axial preload on the inner race. Screwing
+    into bare plastic here would strip, and this joint comes apart often.
+    """
+    tip = start_dia / 2 + reach
     cyl = (cq.Workplane("YZ").workplane(offset=start_dia / 2)
            .circle(boss_dia / 2).extrude(reach))
     cyl = cyl.union(cyl.mirror("YZ"))
-    bore = (cq.Workplane("YZ").workplane(offset=-start_dia)
-            .circle(pin_dia / 2).extrude(2 * start_dia))
-    return solid.union(_rot_z(cyl, axis)).cut(_rot_z(bore, axis))
+    solid = solid.union(_rot_z(cyl, axis))
+    for s in (+1, -1):
+        hole = (F.insert_hole(spec).rotate((0, 0, 0), (0, 1, 0), 90 * s)
+                .translate((s * tip, 0, 0)))
+        solid = solid.cut(_rot_z(hole, axis))
+    return solid
 
 
 def _bolt_circle(solid, bcd, count, dia, height):
@@ -99,6 +125,35 @@ def _bolt_circle(solid, bcd, count, dia, height):
         a = 2 * math.pi * i / count + math.pi / count
         cut = cut.moveTo(bcd / 2 * math.cos(a), bcd / 2 * math.sin(a)).circle(dia / 2)
     return solid.cut(cut.extrude(height * 3, both=True))
+
+
+def _stop_screws(solid, axis, ring_top, target_r, stop_z, riser_r, spec=F.INSERT_M3):
+    """Adjustable stop screws on the axis perpendicular to rotation.
+
+    A moulded-in tab would have to hold a tolerance the printer does not, and any error
+    there becomes travel error. A screw is adjustable, so the limit is set on the bench
+    against a measured angle rather than trusted from the model.
+
+    The stop has to act over the member that moves, which sits inside this ring's bore, so
+    each one is an L: a riser off the annulus and an arm reaching inward, with the insert
+    running vertically through the arm.
+    """
+    arm_t = 5.0
+    arm_top = stop_z + arm_t + spec["depth"]
+    for s in (+1, -1):
+        riser = (cq.Workplane("XY").workplane(offset=ring_top - 1.0)
+                 .center(s * riser_r, 0).rect(9.0, 12.0)
+                 .extrude(arm_top - ring_top + 1.0))
+        arm = (cq.Workplane("XY").workplane(offset=stop_z + arm_t)
+               .center(s * (target_r + riser_r) / 2, 0)
+               .rect(abs(riser_r - target_r) + 9.0, 12.0)
+               .extrude(spec["depth"]))
+        hole = (cq.Workplane("XY").workplane(offset=stop_z)
+                .center(s * target_r, 0).circle(spec["hole_dia"] / 2)
+                .extrude(arm_t + spec["depth"] + 1.0))
+        feature = riser.union(arm).cut(hole)
+        solid = solid.union(_rot_z(feature, "Y" if axis == "X" else "X"))
+    return solid
 
 
 def _lever(axis, radius, length, width, thickness, ball_bore):
@@ -139,19 +194,30 @@ def build(a):
     parts, meta = {}, {}
     plate_z = -(a.rotor_offset + a.rotor_spacing / 2.0)
 
+    stop_r = (a.inner_od + a.inner_id) / 4.0        # mid-width of the inner ring top face
+    stop_z = F.hard_stop_gap(stop_r, a.tilt_deg, a.ring_height / 2.0)
+    arm_stop_z = -a.ring_height / 2.0 - a.stop_drop
+
     outer = _ring(a.outer_id, a.outer_od, a.ring_height)
-    outer = _axis_boss(outer, "Y", a.outer_od, a.boss_dia)
-    outer = _bore_axis(outer, "Y", a.bearing_od, a.bearing_width, a.pin_dia, a.outer_od)
+    outer = _axis_boss(outer, "Y", a.outer_id, a.outer_od, a.boss_dia)
+    outer = _bore_axis(outer, "Y", a.outer_od)
     outer = _bolt_circle(outer, a.airframe_bcd, 6, M3_CLEARANCE, a.ring_height)
+    # Stop-screw bosses, on the axis the inner ring rotates across.
+    outer = _stop_screws(outer, "Y", a.ring_height / 2.0, stop_r, stop_z,
+                         (a.outer_id + a.outer_od) / 4.0)
     parts["outer-ring"] = outer
 
     inner = _ring(a.inner_id, a.inner_od, a.ring_height)
-    inner = _axis_boss(inner, "X", a.inner_od, a.boss_dia)
-    inner = _bore_axis(inner, "X", a.bearing_od, a.bearing_width, a.pin_dia, a.inner_od)
+    inner = _axis_boss(inner, "X", a.inner_id, a.inner_od, a.boss_dia)
+    inner = _bore_axis(inner, "X", a.inner_od)
     inner = _trunnions(inner, "Y", a.inner_od, (a.outer_id - a.inner_od) / 2 + 3.0,
-                       a.boss_dia, a.pin_dia)
+                       a.boss_dia)
     inner = inner.union(_lever("Y", a.inner_od / 2 - 2, a.gimbal_lever, a.lever_width,
                                a.lever_thickness, BALL_LINK_BORE))
+    # Stops for the cradle, reaching below the ring onto the arm shoulder pads.
+    inner = _stop_screws(inner, "X", a.ring_height / 2.0,
+                         a.arm_x_top + a.arm_thickness / 2 + 3.0, arm_stop_z,
+                         (a.inner_id + a.inner_od) / 4.0)
     parts["inner-ring"] = inner
 
     # Cradle: arms on the inner axis reaching down to the motor plate.
@@ -162,7 +228,14 @@ def build(a):
     cradle = cradle.union(cq.Workplane("XY").workplane(offset=plate_z)
                           .circle(a.plate_dia / 2).extrude(a.plate_thickness / 2, both=True))
     cradle = _trunnions(cradle, "X", 2 * (a.arm_x_top + a.arm_thickness / 2) - 4,
-                        a.trunnion_reach, a.boss_dia, a.pin_dia)
+                        a.trunnion_reach, a.boss_dia)
+    # Shoulder pads the inner-ring stop screws land on.
+    for s in (+1, -1):
+        pad = (cq.Workplane("XY").workplane(offset=arm_stop_z - a.stop_pad_t)
+               .center(s * (a.arm_x_top + 1.0), 0)
+               .rect(a.arm_thickness + 6.0, a.arm_width + 6.0)
+               .extrude(a.stop_pad_t))
+        cradle = cradle.union(pad)
     # Motor bolt patterns through the plate, plus a cable pass-through.
     cut = cq.Workplane("XY")
     for bcd in MOTOR_BCD:
@@ -217,6 +290,12 @@ def main(argv=None):
     p.add_argument("--skirt-below-pivot", type=float, default=30.0)
     p.add_argument("--gimbal-lever", type=float, default=30.0)
     p.add_argument("--servo-horn", type=float, default=15.0)
+    p.add_argument("--pushrod-len", type=float, default=60.0)
+    p.add_argument("--linkage-offset", type=float, default=60.0)
+    p.add_argument("--command-limit-deg", type=float, default=8.0)
+    p.add_argument("--stop-drop", type=float, default=10.0,
+                   help="How far below the inner ring the cradle stop pads sit, mm")
+    p.add_argument("--stop-pad-t", type=float, default=4.0)
     p.add_argument("--lever-width", type=float, default=12.0)
     p.add_argument("--lever-thickness", type=float, default=6.0)
     p.add_argument("--servo-l", type=float, default=40.7)
@@ -230,6 +309,32 @@ def main(argv=None):
     combined = combined_tilt_deg(args.tilt_deg)
     h_min = min_rotor_offset(args.frame_radius, combined, args.skirt_below_pivot)
     reduction = args.gimbal_lever / args.servo_horn
+    sweep = F.linkage_travel(args.servo_horn, args.gimbal_lever, args.pushrod_len,
+                             args.linkage_offset, 40.0)
+    neutral = sweep.get("gimbal_at_neutral_deg", 0.0)
+    cmd = [(s, g) for s, g in sweep.get("samples", [])
+           if abs(g - neutral) <= args.command_limit_deg]
+    ratios = [abs((g2 - g1) / (s2 - s1)) for (s1, g1), (s2, g2) in zip(cmd, cmd[1:])
+              if abs(s2 - s1) > 1e-9] or [1.0 / reduction]
+    link = {"gimbal_lever_mm": args.gimbal_lever, "servo_horn_mm": args.servo_horn,
+            "pushrod_len_mm": args.pushrod_len, "linkage_offset_mm": args.linkage_offset,
+            "nominal_reduction": reduction,
+            "closes_over_full_servo_range": sweep.get("closes"),
+            "gimbal_span_deg": sweep.get("gimbal_span_deg"),
+            "ratio_over_command_range": [min(ratios), max(ratios)],
+            "ratio_spread_pct": 100.0 * (max(ratios) - min(ratios)) / max(ratios),
+            "mg996r_deadband_deg_at_servo": 0.9,
+            "deadband_deg_at_gimbal": [0.9 * min(ratios), 0.9 * max(ratios)],
+            "hysteresis_target_deg": 0.5,
+            "deadband_within_target": 0.9 * max(ratios) <= 0.5}
+    stop_r = (args.inner_od + args.inner_id) / 4.0
+    stops = {"outer_axis_stop_radius_mm": stop_r,
+             "outer_axis_stop_face_z_mm": F.hard_stop_gap(stop_r, args.tilt_deg,
+                                                          args.ring_height / 2.0),
+             "cradle_stop_pad_z_mm": -args.ring_height / 2.0 - args.stop_drop,
+             "screw": "M3 into a heat-set insert, adjustable on the bench",
+             "note": "Set each screw against a measured angle. The printed model does "
+                     "not hold this tolerance well enough to trust it as drawn."}
 
     args.output.mkdir(parents=True, exist_ok=True)
     report = {"geometry": {**meta, "per_axis_tilt_deg": args.tilt_deg,
@@ -237,16 +342,18 @@ def main(argv=None):
                            "min_rotor_offset_mm": h_min,
                            "rotor_offset_mm": args.rotor_offset,
                            "rotor_offset_margin_mm": args.rotor_offset - h_min},
-              "linkage": {"gimbal_lever_mm": args.gimbal_lever,
-                          "servo_horn_mm": args.servo_horn, "reduction": reduction,
-                          "mg996r_deadband_deg_at_servo": 0.9,
-                          "deadband_deg_at_gimbal": 0.9 / reduction,
-                          "hysteresis_target_deg": 0.5},
+              "linkage": link,
+              "hard_stops": stops,
+              "fasteners": {
+                  "insert": "M3 heat-set, 4.0 mm pilot hole, 6.7 mm deep, 8 mm boss",
+                  "bearing": "683ZZ 3x7x3, seat %.2f mm press with a %.1f mm lead-in"
+                             % (F.BEARING_683["od"] + F.BEARING_PRESS, F.BEARING_LEADIN),
+                  "pivot": "M3 screw from outside through the bearing bore into the "
+                           "trunnion insert; a shim washer sets the preload"},
               "parts": {}, "not_yet_designed": [
                   "Pushrods and ball links are bought parts; only their holes are modelled.",
-                  "Bearing retention and preload.",
-                  "Hard stops at the travel limits.",
-                  "Motor wire routing and strain relief.",
+                  "Servo horn geometry is assumed, not taken from a measured horn.",
+                  "Stop screw length is set on the bench, not derived here.",
               ], "offline_only": True}
 
     total = 0.0
@@ -268,8 +375,14 @@ def main(argv=None):
           f"plate at {meta['plate_z_mm']:.0f} mm")
     print(f"  minimum rotor offset {h_min:.1f} mm, using {args.rotor_offset:.0f} mm "
           f"-> margin {args.rotor_offset - h_min:+.1f} mm")
-    print(f"  linkage {args.gimbal_lever:.0f}/{args.servo_horn:.0f} = {reduction:.2f}:1, "
-          f"dead band at gimbal {0.9 / reduction:.2f} deg (target 0.5)")
+    print(f"  linkage horn {args.servo_horn:.0f} / lever {args.gimbal_lever:.0f} / rod "
+          f"{args.pushrod_len:.0f} / offset {args.linkage_offset:.0f} mm")
+    print(f"    ratio over the +-{args.command_limit_deg:.0f} deg command range "
+          f"{min(ratios):.3f}-{max(ratios):.3f} (spread {link['ratio_spread_pct']:.1f}%)")
+    print(f"    dead band at gimbal {0.9 * min(ratios):.2f}-{0.9 * max(ratios):.2f} deg, "
+          f"target 0.5 -> {'within' if link['deadband_within_target'] else 'OVER'}")
+    print(f"  hard stops: M3 screws at r={stop_r:.1f} mm, outer-axis stop face "
+          f"z={stops['outer_axis_stop_face_z_mm']:.2f} mm for {args.tilt_deg:.0f} deg")
     print(f"  {'part':15s} {'vol cm3':>9s} {'ASA g':>7s} {'PA-CF g':>8s}   bbox")
     for name, d in report["parts"].items():
         print(f"  {name:15s} {d['volume_cm3']:9.1f} {d['mass_g']['ASA']:7.1f} "
