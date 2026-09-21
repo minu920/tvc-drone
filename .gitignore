@@ -59,6 +59,7 @@ dkms.conf
 
 # Local research environments and generated results
 .venv/
+.venv-cad/
 .build/
 artifacts/
 __pycache__/
