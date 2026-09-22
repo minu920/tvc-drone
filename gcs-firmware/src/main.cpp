@@ -22,7 +22,12 @@
 #define SW2  26   // right switch
 
 // ============ Tunable parameters ============
-const unsigned long HOLD_TIME_MS  = 500;
+// One hold time per command, because they do not want the same one. ARM and LAUNCH should
+// be deliberate; KILL is the emergency stop and must stay fast. A single 500 ms constant
+// used to serve all three, while the comments below claimed 3 s.
+const unsigned long ARM_HOLD_MS    = 2000;
+const unsigned long LAUNCH_HOLD_MS = 2000;
+const unsigned long KILL_HOLD_MS   = 150;   // debounce only, not a deliberate hold
 
 const unsigned long SEND_INTERVAL = 20;
 
@@ -89,6 +94,13 @@ unsigned long rightHoldStart = 0;
 bool armFired    = false;
 bool launchFired = false;
 bool killFired   = false;
+
+// ARM is both switches; LAUNCH is the left one alone. Letting go of the right switch first
+// turns the ARM gesture into the LAUNCH gesture, and the vehicle used to launch on the way
+// out of arming. This latch blocks LAUNCH until both switches have been seen released.
+// KILL is deliberately NOT gated on it: an emergency stop must never be unavailable, and
+// the worst a stray KILL does here is disarm.
+bool launchNeedsRelease = false;
 
 float velx_ref = 0.0f;
 float vely_ref = 0.0f;
@@ -291,23 +303,29 @@ void loop() {
   bool right = isPressed(SW2);
   bool both  = left && right;
 
-  // ---------- 1. ARM: both switches held 3s ----------
+  // Both switches released clears the interlock set by arming.
+  if (!left && !right) launchNeedsRelease = false;
+
+  // ---------- 1. ARM: both switches held for ARM_HOLD_MS ----------
   if (both) {
     if (bothHoldStart == 0) bothHoldStart = now;
-    if (!armFired && (now - bothHoldStart >= HOLD_TIME_MS) && state == STATE_IDLE) {
+    if (!armFired && (now - bothHoldStart >= ARM_HOLD_MS) && state == STATE_IDLE) {
       sendCommand("ARM");
       state = STATE_ARMED;
       armFired = true;
+      launchNeedsRelease = true;   // do not let the release turn into a LAUNCH
     }
   } else {
     bothHoldStart = 0;
     armFired = false;
   }
 
-  // ---------- 2. LAUNCH: left switch alone held 3s ----------
-  if (left && !right) {
+  // ---------- 2. LAUNCH: left switch alone held for LAUNCH_HOLD_MS ----------
+  // Requires a clean release after arming, so letting go of the right switch first cannot
+  // fire it.
+  if (left && !right && !launchNeedsRelease) {
     if (leftHoldStart == 0) leftHoldStart = now;
-    if (!launchFired && (now - leftHoldStart >= HOLD_TIME_MS) && state == STATE_ARMED) {
+    if (!launchFired && (now - leftHoldStart >= LAUNCH_HOLD_MS) && state == STATE_ARMED) {
       sendCommand("LAUNCH");
       state = STATE_FLYING;
       launchFired = true;
@@ -317,10 +335,13 @@ void loop() {
     launchFired = false;
   }
 
-  // ---------- 4. KILL: right switch alone held 3s ----------
+  // ---------- 4. KILL: right switch alone, after KILL_HOLD_MS ----------
+  // Short and never interlocked. Releasing the left switch first after arming will disarm,
+  // which is the harmless direction and is preferred over an emergency stop that can be
+  // blocked.
   if (right && !left) {
     if (rightHoldStart == 0) rightHoldStart = now;
-    if (!killFired && (now - rightHoldStart >= HOLD_TIME_MS)) {
+    if (!killFired && (now - rightHoldStart >= KILL_HOLD_MS)) {
       sendCommand("KILL");
       state = STATE_IDLE;
       killFired = true;

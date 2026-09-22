@@ -126,8 +126,11 @@ void sys_init();
 void sys_check(void);
 
 
-#define LAND_DESCENT_RATE_MPS   0.3f
-#define LAND_ALT_THRESHOLD_M    0.06f
+// Single definition. freertos.c used to redefine these with different values, and since
+// that redefinition won, the numbers here were dead: 0.3 and 0.06 were never in effect.
+// The values below are the ones the vehicle actually flew, so behaviour is unchanged.
+#define LAND_DESCENT_RATE_MPS   0.4f
+#define LAND_ALT_THRESHOLD_M    0.10f
 #define LAND_THRUST_THRESHOLD   2.6f
 #define LAND_HOLD_MS            500
 #define DEFAULT_DT 0.01

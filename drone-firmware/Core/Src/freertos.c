@@ -189,9 +189,10 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 // the existing convention for cross-task flags like dt_init/rz_unwrap_init.
 static volatile bool landing_active = false;
 
-#define LAND_DESCENT_RATE_MPS   0.4f
-#define LAND_ALT_THRESHOLD_M    0.10f
-#define LAND_THRUST_THRESHOLD   2.6f
+// Landing thresholds live in global.h. They used to be redefined here as well, with
+// different values, so editing global.h changed nothing and the build warned about it.
+// The values that were actually in effect are the ones that moved to global.h, so the
+// landing profile is unchanged.
 
 /**
   * @brief  FreeRTOS initialization
