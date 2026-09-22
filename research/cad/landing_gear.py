@@ -112,41 +112,57 @@ def knee(rod_dia, wall, socket_len, angle_a, angle_c, hub_dia, web_t=5.0, fillet
     return solid
 
 
-def straight_bracket(rod_dia, wall, socket_len, angle_deg, plate_l, plate_w, plate_t,
-                     bolt_bcd):
+def straight_bracket(rod_dia, wall, socket_len, angle_deg, plate_radial, plate_tang,
+                     plate_t, bolt_span):
     """Bolts flat to a bulkhead and holds the single leg rod at its angle.
+
+    The rod leans radially outward, so the plate is narrow radially and long tangentially,
+    and the bolts are spaced along the tangent. Spacing them radially instead needs more
+    width than the bulkhead ring has between its bore and its rim, and the bolts land in
+    fresh air.
 
     The socket is gusseted into the plate: with one rod per leg this joint takes the whole
     landing load, where the truss spread it over three.
     """
-    plate = (cq.Workplane("XY").box(plate_l, plate_w, plate_t, centered=(True, True, False))
-             .edges("|Z").fillet(5.0))
+    plate = (cq.Workplane("XY")
+             .box(plate_radial, plate_tang, plate_t, centered=(True, True, False))
+             .edges("|Z").fillet(4.0))
     cut = cq.Workplane("XY")
     for sx in (-1, 1):
         for sy in (-1, 1):
-            cut = cut.moveTo(sx * bolt_bcd / 2, sy * plate_w * 0.29).circle(M3_CLEARANCE / 2)
+            cut = cut.moveTo(sx * plate_radial * 0.28,
+                             sy * bolt_span / 2).circle(M3_CLEARANCE / 2)
     plate = plate.cut(cut.extrude(plate_t * 4, both=True))
 
-    boss, bore = _rod_socket(rod_dia, wall, socket_len, angle_deg)
-    solid = plate.union(boss.translate((0, 0, plate_t - 0.1)))
+    # The leg runs DOWN and outward from the airframe, so the socket leans below the plate
+    # and the bracket bolts to the underside of a bulkhead. Built at the raw angle the
+    # socket opened upward instead, and the rod could not reach the ground from it.
+    down = 180.0 - angle_deg
+    boss, bore = _rod_socket(rod_dia, wall, socket_len, down)
+    solid = plate.union(boss)
 
     # Gusset in the plane the rod leans in, tying the socket back to the plate.
-    a = math.radians(angle_deg)
+    a = math.radians(down)
     tip = (socket_len * math.sin(a), socket_len * math.cos(a))
     gusset = (cq.Workplane("XZ")
-              .polyline([(-plate_l * 0.34, plate_t), (plate_l * 0.34, plate_t),
-                         (tip[0], plate_t + tip[1] * 0.72)]).close()
+              .polyline([(-plate_radial * 0.4, 0.0), (plate_radial * 0.4, 0.0),
+                         (tip[0], tip[1] * 0.72)]).close()
               .extrude(wall / 2, both=True))
-    return solid.union(gusset).cut(bore.translate((0, 0, plate_t - 0.1)))
+    return solid.union(gusset).cut(bore)
 
 
-def foot(rod_dia, wall, socket_len, pad_dia, pad_t):
+def foot(rod_dia, wall, socket_len, pad_dia, pad_t, angle_deg=0.0):
+    """Ground pad with a socket leaning back along the leg.
+
+    The socket has to lean at the leg angle. Building it on an unrotated workplane, as this
+    did, leaves the bore vertical while the rod arrives at 29 degrees, and the rod simply
+    does not enter. Every other socket in this file takes the angle; this one silently
+    dropped it.
+    """
     pad = cq.Workplane("XY").circle(pad_dia / 2).extrude(pad_t).edges(">Z").fillet(2.0)
-    boss = (cq.Workplane("XY").workplane(offset=pad_t)
-            .circle((rod_dia + 2 * wall) / 2).extrude(socket_len))
-    bore = (cq.Workplane("XY").workplane(offset=pad_t)
-            .circle(rod_dia / 2).extrude(socket_len - wall))
-    return pad.union(boss).cut(bore)
+    boss, bore = _rod_socket(rod_dia, wall, socket_len, angle_deg)
+    return (pad.union(boss.translate((0, 0, pad_t - 0.01)))
+            .cut(bore.translate((0, 0, pad_t - 0.01))))
 
 
 def main(argv=None):
@@ -173,8 +189,13 @@ def main(argv=None):
     # Attaches at the top bulkhead station. Foot radius is set for about 15 mm of
     # centreline clearance, not the bare minimum that just touches: half the rod
     # diameter comes off that, and the sweep model itself carries assumptions.
-    p.add_argument("--straight-attach-z", type=float, default=290.0)
-    p.add_argument("--straight-attach-r", type=float, default=25.0)
+    p.add_argument("--straight-attach-z", type=float, default=320.0)
+    # Sits on the bulkhead ring rather than over its bore. Moving the attachment out
+    # also improves rotor clearance slightly, from +17.5 to +22.0 mm.
+    p.add_argument("--straight-attach-r", type=float, default=34.0)
+    p.add_argument("--bracket-radial", type=float, default=19.0)
+    p.add_argument("--bracket-tang", type=float, default=44.0)
+    p.add_argument("--bracket-bolt-span", type=float, default=30.0)
     p.add_argument("--straight-foot-r", type=float, default=290.0)
     p.add_argument("--straight-foot-z", type=float, default=-185.0)
     p.add_argument("--output", type=Path, default=Path("artifacts/cad"))
@@ -209,8 +230,10 @@ def main(argv=None):
         angle = checks["leg rod"]["angle_from_vertical_deg"]
         parts = {
             "leg-bracket": straight_bracket(args.rod_dia, args.wall, args.socket_len + 8.0,
-                                            angle, 46.0, 28.0, 5.0, 32.0),
-            "leg-foot": foot(args.rod_dia, args.wall, args.socket_len, 34.0, 6.0),
+                                            angle, args.bracket_radial, args.bracket_tang,
+                                            5.0, args.bracket_bolt_span),
+            "leg-foot": foot(args.rod_dia, args.wall, args.socket_len, 34.0, 6.0, angle),
+            # the foot socket leans back up the leg, which is the raw angle
         }
     else:
         angle_a = checks["A upper diagonal"]["angle_from_vertical_deg"]
@@ -222,7 +245,7 @@ def main(argv=None):
                                               angle_c, 44.0, 26.0, 4.0, 30.0),
             "leg-knee": knee(args.rod_dia, args.wall, args.socket_len, angle_a, angle_c,
                              args.rod_dia + 2 * args.wall + 6.0, args.knee_web_t),
-            "leg-foot": foot(args.rod_dia, args.wall, args.socket_len, 30.0, 5.0),
+            "leg-foot": foot(args.rod_dia, args.wall, args.socket_len, 30.0, 5.0, 0.0),
         }
 
     env_profile = env.envelope_profile(env.PROP_DIAMETER_MM / 2, args.rotor_spacing,

@@ -56,15 +56,29 @@ def main(argv=None):
     p.add_argument("--knee-r", type=float, default=215.0)
     p.add_argument("--knee-z", type=float, default=15.0)
     p.add_argument("--foot-z", type=float, default=-215.0)
-    p.add_argument("--attach-r", type=float, default=43.0)
+    # Must match landing_gear.py --straight-attach-r: this radius is both where the
+    # bracket is placed and where the verified strut centreline starts.
+    p.add_argument("--attach-r", type=float, default=34.0)
     p.add_argument("--attach-a-z", type=float, default=140.0)
     p.add_argument("--attach-c-z", type=float, default=30.0)
     p.add_argument("--stations", type=str, default="",
                    help="Comma-separated bulkhead z positions; blank uses the shell layout")
-    p.add_argument("--straight-attach-z", type=float, default=290.0)
+    p.add_argument("--straight-attach-z", type=float, default=320.0)
     p.add_argument("--straight-foot-r", type=float, default=290.0)
     p.add_argument("--straight-foot-z", type=float, default=-185.0)
+    p.add_argument("--bulkhead-thickness", type=float, default=4.0)
+    p.add_argument("--boss-height", type=float, default=8.2,
+                   help="How far the bulkhead insert bosses stand proud, mm")
+    p.add_argument("--bracket-plate-t", type=float, default=5.0)
+    p.add_argument("--servo-z", type=float, default=38.0)
+    p.add_argument("--servo-pitch", type=float, default=22.0,
+                   help="Axial spacing between the two servo brackets, mm")
+    p.add_argument("--tray-z", type=float, default=90.0)
     p.add_argument("--rod-dia", type=float, default=8.0)
+    p.add_argument("--clash-tol", type=float, default=1.0,
+                   help="Intersection volume in mm3 below which a pair is treated as touching")
+    p.add_argument("--allow-clashes", action="store_true",
+                   help="Report interference but still write the assembly")
     p.add_argument("--spine-count", type=int, default=4)
     p.add_argument("--spine-bcd", type=float, default=70.0)
     p.add_argument("--spine-dia", type=float, default=8.0)
@@ -88,11 +102,14 @@ def main(argv=None):
         "gimbal-cradle": IDENTITY,
         # Placed here.
         "bulkhead": [(0.0, 0.0, z, 0.0) for z in stations],
-        "battery-tray": [(0.0, 0.0, stations[0] + 14.0, 0.0)],
+        # Flange bolts onto the insert bosses, so it stands off the ring by their height.
+        "battery-tray": [(0.0, 0.0, args.tray_z + args.boss_height, 0.0)],
         # Servos sit just above the gimbal. The linkage offset is axial, not radial:
         # 60 mm radially would put the servo outside the body.
-        "gimbal-servo-bracket": [(0.0, 0.0, args.body_z + 20.0, 0.0),
-                                 (0.0, 0.0, args.body_z + 20.0, 90.0)],
+        # Two servos, stacked rather than stacked on top of each other: both were
+        # previously placed at the identical point and differed only by rotation.
+        "gimbal-servo-bracket": [(0.0, 0.0, args.servo_z, 0.0),
+                                 (0.0, 0.0, args.servo_z + args.servo_pitch, 90.0)],
     }
     if not args.no_shell:
         layout.update({
@@ -103,7 +120,9 @@ def main(argv=None):
             "rocket-shell-fin": [(0.0, 0.0, 0.0, 90.0 * i) for i in range(4)],
         })
     if args.legs_style == "straight":
-        layout["leg-bracket"] = on_ring(args.attach_r, args.straight_attach_z)
+        # Under the bulkhead, clear of the insert bosses that stand up from its top face.
+        layout["leg-bracket"] = on_ring(args.attach_r,
+                                        args.straight_attach_z - args.bracket_plate_t)
         layout["leg-foot"] = on_ring(args.straight_foot_r, args.straight_foot_z)
     else:
         layout["leg-bracket-upper"] = on_ring(args.attach_r, args.attach_a_z)
@@ -111,7 +130,7 @@ def main(argv=None):
         layout["leg-knee"] = on_ring(args.knee_r, args.knee_z)
         layout["leg-foot"] = on_ring(args.knee_r, args.foot_z)
 
-    assembly, bom, missing = None, [], []
+    placed, bom, missing = [], [], []
     for stem, places in layout.items():
         step = args.parts / f"{stem}.step"
         if not step.exists():
@@ -119,15 +138,42 @@ def main(argv=None):
             continue
         shape = cq.importers.importStep(str(step))
         volume = shape.val().Volume()
-        for x, y, z, rz in places:
+        solids = len(shape.solids().vals())
+        for n, (x, y, z, rz) in enumerate(places):
             moved = shape.rotate((0, 0, 0), (0, 0, 1), rz).translate((x, y, z))
-            assembly = moved if assembly is None else assembly.union(moved)
+            placed.append((f"{stem}#{n}" if len(places) > 1 else stem, moved))
         bom.append({"part": stem, "count": len(places),
                     "volume_cm3": volume / 1000.0,
+                    "solids_in_step": solids,
                     "mass_asa_g": volume / 1000.0 * DENSITY_ASA * len(places)})
     if missing:
         raise SystemExit(f"Missing exported parts: {', '.join(missing)}. "
                          "Run the generators first.")
+
+    # Interference check, before anything is unioned. Unioning first hides exactly the
+    # defect worth catching: parts that occupy the same space cannot be assembled, and on
+    # the gimbal they cannot rotate. Bolted parts meet face to face, so any non-trivial
+    # intersection volume is a defect rather than intended contact.
+    clashes = []
+    for a in range(len(placed)):
+        for b in range(a + 1, len(placed)):
+            na, sa = placed[a]
+            nb, sb = placed[b]
+            ba, bb = sa.val().BoundingBox(), sb.val().BoundingBox()
+            if (ba.xmax < bb.xmin or bb.xmax < ba.xmin or ba.ymax < bb.ymin
+                    or bb.ymax < ba.ymin or ba.zmax < bb.zmin or bb.zmax < ba.zmin):
+                continue                      # boxes miss, skip the boolean
+            try:
+                vol = sa.intersect(sb).val().Volume()
+            except Exception:
+                continue
+            if vol > args.clash_tol:
+                clashes.append({"a": na, "b": nb, "volume_mm3": round(vol, 2)})
+    stray = [b["part"] for b in bom if b["solids_in_step"] > 1]
+
+    assembly = None
+    for _, solid in placed:
+        assembly = solid if assembly is None else assembly.union(solid)
 
     # Carbon struts, drawn for context only.
     if args.legs_style == "straight":
@@ -171,6 +217,8 @@ def main(argv=None):
               "printed_kinds": len(bom),
               "printed_pieces": sum(b["count"] for b in bom),
               "printed_mass_asa_g": printed_total,
+              "interference": {"pairs": clashes, "tolerance_mm3": args.clash_tol},
+              "steps_with_stray_solids": stray,
               "carbon_leg_rod_total_mm": rod_len_mm,
               "carbon_spine_total_mm": spine_len_mm,
               "carbon_rod_total_mm": rod_len_mm + spine_len_mm,
@@ -195,9 +243,18 @@ def main(argv=None):
     print(f"  {report['printed_kinds']} kinds, {report['printed_pieces']} pieces printed")
     print(f"  carbon: legs {rod_len_mm / 1000:.2f} m + spine {spine_len_mm / 1000:.2f} m "
           f"= {(rod_len_mm + spine_len_mm) / 1000:.2f} m of {args.rod_dia:.0f} mm rod")
+    if clashes:
+        print(f"  INTERFERENCE: {len(clashes)} pair(s) occupy the same space")
+        for c in clashes:
+            print(f"    {c['a']} / {c['b']}: {c['volume_mm3']} mm3")
+    else:
+        print("  interference: none above "
+              f"{args.clash_tol} mm3 across {len(placed)} placed bodies")
+    if stray:
+        print(f"  STRAY SOLIDS in: {', '.join(stray)} (a slicer will treat these as parts)")
     print(f"  wrote vehicle-assembly.step / .stl / .json to {args.output.resolve()}")
     print("Printed parts and carbon struts only. Bought hardware is not placed.")
-    return 0
+    return 2 if (clashes or stray) and not args.allow_clashes else 0
 
 
 if __name__ == "__main__":

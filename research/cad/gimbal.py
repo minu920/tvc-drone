@@ -29,8 +29,8 @@ A pushrod ratio is not constant with angle the way a gear ratio is. Over the com
 travel the variation is small, but it is real and belongs in the control allocation rather
 than being assumed away.
 
-Motor interface comes from the supplied D4215 STEP: 42.25 mm body, M3 on 16 mm and 19 mm
-bolt circles. Third-party model values, not caliper measurements.
+Motor interface comes from the supplied D4215 STEP: 42.25 mm body and a rectangular
+16 x 19 mm four-screw M3 pattern. Third-party model values, not caliper measurements.
 """
 import argparse
 import json
@@ -44,7 +44,12 @@ import features as F
 DENSITY = {"PLA": 1.24, "PETG": 1.27, "ABS": 1.04, "ASA": 1.07, "PA-CF": 1.10}
 
 MOTOR_OD = 42.25
-MOTOR_BCD = (16.0, 19.0)
+# 16x19 is one rectangular pattern, not two bolt circles: the 16 mm pair sits on one
+# axis and the 19 mm pair on the perpendicular one, four screws in total. Read off the
+# supplied D4215 STEP, where the 16 mm holes are at 90/270 deg and the 19 mm at 0/180.
+# Treating it as two full circles of four puts holes 1.5 mm apart with 3.4 mm
+# clearance, so the cutters overlap and the boolean leaves plugs behind.
+MOTOR_HOLES = ((0.0, 8.0), (0.0, -8.0), (9.5, 0.0), (-9.5, 0.0))
 M3_CLEARANCE = 3.4
 BALL_LINK_BORE = 3.2
 
@@ -69,12 +74,14 @@ def _rot_z(shape, axis):
     return shape.rotate((0, 0, 0), (0, 0, 1), 90) if axis == "Y" else shape
 
 
-def _axis_boss(solid, axis, inner_dia, outer_dia, boss_dia, overhang=2.0):
+def _axis_boss(solid, axis, inner_dia, outer_dia, boss_dia, overhang=0.0):
     """Local thickening on one axis so a bearing seat has material around it.
 
-    Only the annulus is thickened, plus a small overhang past the bore. Extruding a
-    cylinder across the full diameter instead would leave a bar straight through the ring,
-    blocking whatever is meant to pivot inside it.
+    Only the annulus is thickened. Extruding a cylinder across the full diameter instead
+    would leave a bar straight through the ring, blocking whatever is meant to pivot inside
+    it. The overhang defaults to zero because the gap between a ring bore and the member
+    turning inside it is only 2 mm: any overhang eats exactly that running clearance, and
+    the parts come out interfering.
     """
     for s in (+1, -1):
         start = s * (inner_dia / 2 - overhang)
@@ -127,7 +134,8 @@ def _bolt_circle(solid, bcd, count, dia, height):
     return solid.cut(cut.extrude(height * 3, both=True))
 
 
-def _stop_screws(solid, axis, ring_top, target_r, stop_z, riser_r, spec=F.INSERT_M3):
+def _stop_screws(solid, axis, ring_top, target_r, stop_z, riser_r, annulus_w,
+                 spec=F.INSERT_M3):
     """Adjustable stop screws on the axis perpendicular to rotation.
 
     A moulded-in tab would have to hold a tolerance the printer does not, and any error
@@ -137,16 +145,27 @@ def _stop_screws(solid, axis, ring_top, target_r, stop_z, riser_r, spec=F.INSERT
     The stop has to act over the member that moves, which sits inside this ring's bore, so
     each one is an L: a riser off the annulus and an arm reaching inward, with the insert
     running vertically through the arm.
+
+    The riser is only as wide radially as the annulus it stands on. A wider one hangs over
+    the bore on the inside and past the rim on the outside, and on the inner ring that
+    overhang reached into the outer ring and locked the gimbal.
     """
     arm_t = 5.0
+    riser_radial = min(9.0, annulus_w)
     arm_top = stop_z + arm_t + spec["depth"]
     for s in (+1, -1):
         riser = (cq.Workplane("XY").workplane(offset=ring_top - 1.0)
-                 .center(s * riser_r, 0).rect(9.0, 12.0)
+                 .center(s * riser_r, 0).rect(riser_radial, 12.0)
                  .extrude(arm_top - ring_top + 1.0))
+        # The arm runs from the riser's outer face inward to just past the insert, rather
+        # than being centred between the two radii with slop added on both sides. Sized
+        # the latter way it overshot the riser outward and reached into the ring turning
+        # outside this one.
+        arm_out = riser_r + riser_radial / 2.0
+        arm_in = target_r - spec["boss_dia"] / 2.0
         arm = (cq.Workplane("XY").workplane(offset=stop_z + arm_t)
-               .center(s * (target_r + riser_r) / 2, 0)
-               .rect(abs(riser_r - target_r) + 9.0, 12.0)
+               .center(s * (arm_out + arm_in) / 2.0, 0)
+               .rect(arm_out - arm_in, 12.0)
                .extrude(spec["depth"]))
         hole = (cq.Workplane("XY").workplane(offset=stop_z)
                 .center(s * target_r, 0).circle(spec["hole_dia"] / 2)
@@ -204,20 +223,30 @@ def build(a):
     outer = _bolt_circle(outer, a.airframe_bcd, 6, M3_CLEARANCE, a.ring_height)
     # Stop-screw bosses, on the axis the inner ring rotates across.
     outer = _stop_screws(outer, "Y", a.ring_height / 2.0, stop_r, stop_z,
-                         (a.outer_id + a.outer_od) / 4.0)
+                         (a.outer_id + a.outer_od) / 4.0,
+                         (a.outer_od - a.outer_id) / 2.0)
     parts["outer-ring"] = outer
 
     inner = _ring(a.inner_id, a.inner_od, a.ring_height)
     inner = _axis_boss(inner, "X", a.inner_id, a.inner_od, a.boss_dia)
     inner = _bore_axis(inner, "X", a.inner_od)
-    inner = _trunnions(inner, "Y", a.inner_od, (a.outer_id - a.inner_od) / 2 + 3.0,
+    # The trunnion is a stub that must stop short of the ring turning around it: the pin
+    # spans the rest through the bearing. Reaching into the mating bore instead makes the
+    # two solids interfere and the gimbal cannot turn.
+    inner = _trunnions(inner, "Y", a.inner_od,
+                       (a.outer_id - a.inner_od) / 2 - a.running_clearance,
                        a.boss_dia)
-    inner = inner.union(_lever("Y", a.inner_od / 2 - 2, a.gimbal_lever, a.lever_width,
+    # The lever hangs from the pivot axis but must not reach past the bore of the ring
+    # turning around it. Placed at inner_od/2 its outer edge sat 2 mm inside the outer
+    # ring's annulus, so the two interfered and the gimbal could not turn.
+    lever_r = a.inner_id / 2 - a.lever_width / 2 - a.running_clearance
+    inner = inner.union(_lever("Y", lever_r, a.gimbal_lever, a.lever_width,
                                a.lever_thickness, BALL_LINK_BORE))
     # Stops for the cradle, reaching below the ring onto the arm shoulder pads.
     inner = _stop_screws(inner, "X", a.ring_height / 2.0,
                          a.arm_x_top + a.arm_thickness / 2 + 3.0, arm_stop_z,
-                         (a.inner_id + a.inner_od) / 4.0)
+                         (a.inner_id + a.inner_od) / 4.0,
+                         (a.inner_od - a.inner_id) / 2.0)
     parts["inner-ring"] = inner
 
     # Cradle: arms on the inner axis reaching down to the motor plate.
@@ -227,8 +256,10 @@ def build(a):
     cradle = arm.union(arm.mirror("YZ"))
     cradle = cradle.union(cq.Workplane("XY").workplane(offset=plate_z)
                           .circle(a.plate_dia / 2).extrude(a.plate_thickness / 2, both=True))
-    cradle = _trunnions(cradle, "X", 2 * (a.arm_x_top + a.arm_thickness / 2) - 4,
-                        a.trunnion_reach, a.boss_dia)
+    arm_outer = a.arm_x_top + a.arm_thickness / 2
+    cradle = _trunnions(cradle, "X", 2 * arm_outer,
+                        a.inner_id / 2 - arm_outer - a.running_clearance,
+                        a.boss_dia)
     # Shoulder pads the inner-ring stop screws land on.
     for s in (+1, -1):
         pad = (cq.Workplane("XY").workplane(offset=arm_stop_z - a.stop_pad_t)
@@ -238,10 +269,8 @@ def build(a):
         cradle = cradle.union(pad)
     # Motor bolt patterns through the plate, plus a cable pass-through.
     cut = cq.Workplane("XY")
-    for bcd in MOTOR_BCD:
-        for i in range(4):
-            ang = math.radians(45 + 90 * i)
-            cut = cut.moveTo(bcd / 2 * math.cos(ang), bcd / 2 * math.sin(ang)).circle(M3_CLEARANCE / 2)
+    for hx, hy in MOTOR_HOLES:
+        cut = cut.moveTo(hx, hy).circle(M3_CLEARANCE / 2)
     cut = cut.moveTo(0, 0).circle(a.cable_hole / 2)
     cradle = cradle.cut(cut.extrude(abs(plate_z) * 3, both=True))
     # Pushrod attachment through one arm. The cradle turns about X, so a point on the arm
@@ -274,7 +303,8 @@ def main(argv=None):
     p.add_argument("--arm-x-bot", type=float, default=30.0)
     p.add_argument("--arm-thickness", type=float, default=8.0)
     p.add_argument("--arm-width", type=float, default=10.0)
-    p.add_argument("--trunnion-reach", type=float, default=4.0)
+    p.add_argument("--running-clearance", type=float, default=1.0,
+                   help="Gap a trunnion stops short of the bore it turns inside, mm")
     p.add_argument("--plate-dia", type=float, default=56.0)
     p.add_argument("--plate-thickness", type=float, default=6.0)
     p.add_argument("--cable-hole", type=float, default=12.0)

@@ -105,21 +105,51 @@ def bulkhead(outer_dia, thickness, bore, spine_bcd, spine_holes, spine_dia,
     return ring.cut(notch), walls
 
 
-def battery_tray(pack_l, pack_w, pack_h, wall, body_bore, strap_width):
-    """U-channel sized to the pack, with a curved back that sits against the body wall."""
+def battery_tray(pack_l, pack_w, pack_h, wall, frame_dia, strap_width, insert_bcd,
+                 insert_angles):
+    """U-channel cradling the pack along the vehicle axis, bolting to a bulkhead.
+
+    The pack is 137 mm long and no bulkhead bore it could pass through is wider than about
+    48 mm, so it stands up the axis in the open bay rather than lying across it. An earlier
+    version laid it along X and then trimmed the result to the bore, which quietly cut the
+    137 mm cradle down to the bore diameter.
+
+    Nothing here has to fit through a bore: the tray is bolted in from the side of an open
+    frame. It only has to stay inside the frame envelope.
+    """
+    length = pack_l + 2 * wall
     outer = (cq.Workplane("XY")
-             .box(pack_l, pack_w + 2 * wall, pack_h / 2 + wall, centered=(True, True, False)))
+             .box(pack_w + 2 * wall, pack_h + 2 * wall, length, centered=(True, True, False)))
+    # Pocket for the pack, open at the top and along +Y so it can be dropped in.
     pocket = (cq.Workplane("XY").workplane(offset=wall)
-              .box(pack_l + 2, pack_w, pack_h, centered=(True, True, False)))
+              .box(pack_w, pack_h + 2 * wall, length, centered=(True, True, False))
+              .translate((0, wall, 0)))
     tray = outer.cut(pocket)
-    # Trim anything outside the body bore so it drops in.
-    tray = tray.intersect(cq.Workplane("XY").circle(body_bore / 2)
-                          .extrude(pack_h * 3, both=True))
-    # Strap slots near each end.
-    slots = cq.Workplane("XY")
-    for s in (-1, 1):
-        slots = slots.moveTo(s * pack_l * 0.32, 0).rect(strap_width, pack_w + 2 * wall + 10)
-    tray = tray.cut(slots.extrude(wall, both=False).translate((0, 0, -0.1)))
+
+    # Base flange bolting to the bulkhead inserts.
+    flange = cq.Workplane("XY").box(insert_bcd + 14.0, insert_bcd + 14.0, wall,
+                                    centered=(True, True, False))
+    holes = cq.Workplane("XY")
+    for a_deg in insert_angles:
+        a = math.radians(a_deg)
+        holes = holes.moveTo(insert_bcd / 2 * math.cos(a),
+                             insert_bcd / 2 * math.sin(a)).circle(M3_CLEARANCE / 2)
+    flange = flange.cut(holes.extrude(wall * 4, both=True))
+    flange = flange.intersect(cq.Workplane("XY").circle(frame_dia / 2)
+                              .extrude(wall * 4, both=True))
+    tray = tray.union(flange)
+
+    # Strap slots through the two side walls only. Cutting the full cross-section, as an
+    # earlier version did, severed the cradle into three separate solids: a slicer then
+    # treats each as its own part.
+    for f in (0.25, 0.75):
+        z = wall + pack_l * f
+        for s in (-1, 1):
+            slot = (cq.Workplane("XY")
+                    .box(wall + 1.0, pack_h + 2 * wall + 2.0, strap_width,
+                         centered=(True, True, False))
+                    .translate((s * (pack_w + wall) / 2, 0, z - strap_width / 2)))
+            tray = tray.cut(slot)
     return tray
 
 
@@ -176,7 +206,7 @@ def main(argv=None):
         "bulkhead": ring,
         "battery-tray": battery_tray(L, W, H, args.tray_wall,
                                      (ring_od if args.no_shell else body_bore) - 0.6,
-                                     args.strap_width),
+                                     args.strap_width, args.insert_bcd, insert_angles),
     }
     counts = {"bulkhead": 4, "battery-tray": 1}
 

@@ -24,7 +24,8 @@ import cadquery as cq
 import features as F
 
 MOTOR_OD = 42.25
-MOTOR_BCD = (16.0, 19.0)
+# Rectangular 16x19, four screws. See the note in gimbal.py.
+MOTOR_HOLES = ((0.0, 8.0), (0.0, -8.0), (9.5, 0.0), (-9.5, 0.0))
 
 
 def coupon(length, width, thickness, boss_h, scribe_depth):
@@ -34,11 +35,8 @@ def coupon(length, width, thickness, boss_h, scribe_depth):
     # --- station 1: motor bolt pattern, at -x ---
     x1 = -length / 4.0
     holes = cq.Workplane("XY")
-    for bcd in MOTOR_BCD:
-        for i in range(4):
-            a = math.radians(45 + 90 * i)
-            holes = holes.moveTo(x1 + bcd / 2 * math.cos(a),
-                                 bcd / 2 * math.sin(a)).circle(F.M3_CLEARANCE / 2)
+    for hx, hy in MOTOR_HOLES:
+        holes = holes.moveTo(x1 + hx, hy).circle(F.M3_CLEARANCE / 2)
     plate = plate.cut(holes.extrude(thickness * 3, both=True))
     # Scribe the motor outline so the real can be set against it.
     scribe = (cq.Workplane("XY").workplane(offset=thickness - scribe_depth)
@@ -80,7 +78,7 @@ def main(argv=None):
 
     checks = [
         {"station": "motor bolt pattern",
-         "what": "M3 clearance holes on 16 and 19 mm bolt circles, 42.25 mm body scribed",
+         "what": "M3 clearance, rectangular 16 x 19 mm pattern, 42.25 mm body scribed",
          "pass": "The motor drops onto either bolt circle and its body sits inside the "
                  "scribed ring with an even gap all round.",
          "if_wrong": "Measure the real bolt circle and body diameter and set MOTOR_BCD and "
