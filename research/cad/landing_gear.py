@@ -1,23 +1,27 @@
 """Generate the landing gear, offline.
 
-A straight leg from the airframe to the ground is not possible on this vehicle. The rotor
-rim swings upward when the gimbal tilts, and the swept band reaches inward to about 63 mm
-radius near the pivot plane while extending out to 199 mm. Any straight strut from the body
-to a foot outside the rotors has to cross that band. Every straight geometry tried fouls,
-by 36 to 100 mm depending on the attachment height.
+Two styles, both verified against the exact rotor sweep rather than against the propeller
+diameter:
 
-So each leg is a truss that leaves the airframe above the swept volume, reaches outward
-clear of it, and only then turns down:
+    straight  one rod per leg, airframe to foot. The default.
+    truss     three rods per leg meeting at a knee. Kept for the case where the stance
+              has to be narrow.
 
-    strut A  upper diagonal, body to knee            carries compression
-    strut C  lower tie, body to knee                 triangulates the knee
-    strut B  vertical leg, knee to foot              carries the landing load
+A straight leg does clear the swept rotors, provided it attaches high enough on the
+airframe and the foot is set far enough out. An earlier revision of this file concluded it
+could not, and built the truss on that basis. That conclusion came from searching too small
+a range of attachment heights and foot radii, not from the geometry: the reference vehicle
+flies on straight legs, and running its proportions through the same check reproduced the
+same false negative, which is what exposed the error.
+
+The trade between them is stance against part count. At the 15 degree per-axis hard stop
+with a 10 mm margin, a straight leg needs about 570 mm of stance attaching at z = 240,
+against 430 mm for the truss. In exchange it drops from twelve printed fittings to six,
+removes about 48 g, and removes the knee, which was the joint reacting a bending moment and
+the weakest point in the truss layout.
 
 Struts are bought carbon rod. Only the end fittings are printed, which follows the baseline
-specification's rule that thrust and landing loads stay in carbon rather than in printed
-parts. Every strut is verified against the exact rotor sweep, not against the propeller
-diameter and not against the revolved keep-out solid, which is deliberately conservative
-near the axis and would reject the airframe itself.
+specification's rule that thrust and landing loads stay in carbon rather than printed parts.
 """
 import argparse
 import json
@@ -108,6 +112,34 @@ def knee(rod_dia, wall, socket_len, angle_a, angle_c, hub_dia, web_t=5.0, fillet
     return solid
 
 
+def straight_bracket(rod_dia, wall, socket_len, angle_deg, plate_l, plate_w, plate_t,
+                     bolt_bcd):
+    """Bolts flat to a bulkhead and holds the single leg rod at its angle.
+
+    The socket is gusseted into the plate: with one rod per leg this joint takes the whole
+    landing load, where the truss spread it over three.
+    """
+    plate = (cq.Workplane("XY").box(plate_l, plate_w, plate_t, centered=(True, True, False))
+             .edges("|Z").fillet(5.0))
+    cut = cq.Workplane("XY")
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            cut = cut.moveTo(sx * bolt_bcd / 2, sy * plate_w * 0.29).circle(M3_CLEARANCE / 2)
+    plate = plate.cut(cut.extrude(plate_t * 4, both=True))
+
+    boss, bore = _rod_socket(rod_dia, wall, socket_len, angle_deg)
+    solid = plate.union(boss.translate((0, 0, plate_t - 0.1)))
+
+    # Gusset in the plane the rod leans in, tying the socket back to the plate.
+    a = math.radians(angle_deg)
+    tip = (socket_len * math.sin(a), socket_len * math.cos(a))
+    gusset = (cq.Workplane("XZ")
+              .polyline([(-plate_l * 0.34, plate_t), (plate_l * 0.34, plate_t),
+                         (tip[0], plate_t + tip[1] * 0.72)]).close()
+              .extrude(wall / 2, both=True))
+    return solid.union(gusset).cut(bore.translate((0, 0, plate_t - 0.1)))
+
+
 def foot(rod_dia, wall, socket_len, pad_dia, pad_t):
     pad = cq.Workplane("XY").circle(pad_dia / 2).extrude(pad_t).edges(">Z").fillet(2.0)
     boss = (cq.Workplane("XY").workplane(offset=pad_t)
@@ -120,7 +152,8 @@ def foot(rod_dia, wall, socket_len, pad_dia, pad_t):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--legs", type=int, default=4)
+    p.add_argument("--style", choices=("straight", "truss"), default="straight")
+    p.add_argument("--legs", type=int, default=3)
     p.add_argument("--body-r", type=float, default=43.0)
     p.add_argument("--attach-a-z", type=float, default=140.0)
     p.add_argument("--attach-c-z", type=float, default=30.0)
@@ -137,17 +170,28 @@ def main(argv=None):
     p.add_argument("--min-margin", type=float, default=10.0)
     p.add_argument("--knee-web-t", type=float, default=5.0,
                    help="Gusset thickness across the truss plane, mm")
+    # Attaches at the top bulkhead station. Foot radius is set for about 15 mm of
+    # centreline clearance, not the bare minimum that just touches: half the rod
+    # diameter comes off that, and the sweep model itself carries assumptions.
+    p.add_argument("--straight-attach-z", type=float, default=280.0)
+    p.add_argument("--straight-attach-r", type=float, default=25.0)
+    p.add_argument("--straight-foot-r", type=float, default=290.0)
+    p.add_argument("--straight-foot-z", type=float, default=-185.0)
     p.add_argument("--output", type=Path, default=Path("artifacts/cad"))
     args = p.parse_args(argv)
 
     pivot_offset = args.rotor_offset + args.rotor_spacing / 2.0
     tilt = env.combined_tilt_deg(args.per_axis_deg)
-    knee_pt = (args.knee_r, args.knee_z)
-    struts = {
-        "A upper diagonal": ((args.body_r, args.attach_a_z), knee_pt),
-        "C lower tie": ((args.body_r, args.attach_c_z), knee_pt),
-        "B vertical leg": (knee_pt, (args.knee_r, args.foot_z)),
-    }
+    if args.style == "straight":
+        struts = {"leg rod": ((args.straight_attach_r, args.straight_attach_z),
+                              (args.straight_foot_r, args.straight_foot_z))}
+    else:
+        knee_pt = (args.knee_r, args.knee_z)
+        struts = {
+            "A upper diagonal": ((args.body_r, args.attach_a_z), knee_pt),
+            "C lower tie": ((args.body_r, args.attach_c_z), knee_pt),
+            "B vertical leg": (knee_pt, (args.knee_r, args.foot_z)),
+        }
     checks, fouled = {}, []
     for name, (p0, p1) in struts.items():
         gap, z = strut_clearance(p0, p1, args.rotor_spacing, args.disc_thickness,
@@ -161,33 +205,45 @@ def main(argv=None):
         if not checks[name]["passes"]:
             fouled.append(name)
 
-    angle_a = checks["A upper diagonal"]["angle_from_vertical_deg"]
-    angle_c = checks["C lower tie"]["angle_from_vertical_deg"]
-    parts = {
-        "leg-bracket-upper": body_bracket(args.rod_dia, args.wall, args.socket_len,
-                                          angle_a, 44.0, 26.0, 4.0, 30.0),
-        "leg-bracket-lower": body_bracket(args.rod_dia, args.wall, args.socket_len,
-                                          angle_c, 44.0, 26.0, 4.0, 30.0),
-        "leg-knee": knee(args.rod_dia, args.wall, args.socket_len, angle_a, angle_c,
-                         args.rod_dia + 2 * args.wall + 6.0, args.knee_web_t),
-        "leg-foot": foot(args.rod_dia, args.wall, args.socket_len, 30.0, 5.0),
-    }
+    if args.style == "straight":
+        angle = checks["leg rod"]["angle_from_vertical_deg"]
+        parts = {
+            "leg-bracket": straight_bracket(args.rod_dia, args.wall, args.socket_len + 8.0,
+                                            angle, 46.0, 28.0, 5.0, 32.0),
+            "leg-foot": foot(args.rod_dia, args.wall, args.socket_len, 34.0, 6.0),
+        }
+    else:
+        angle_a = checks["A upper diagonal"]["angle_from_vertical_deg"]
+        angle_c = checks["C lower tie"]["angle_from_vertical_deg"]
+        parts = {
+            "leg-bracket-upper": body_bracket(args.rod_dia, args.wall, args.socket_len,
+                                              angle_a, 44.0, 26.0, 4.0, 30.0),
+            "leg-bracket-lower": body_bracket(args.rod_dia, args.wall, args.socket_len,
+                                              angle_c, 44.0, 26.0, 4.0, 30.0),
+            "leg-knee": knee(args.rod_dia, args.wall, args.socket_len, angle_a, angle_c,
+                             args.rod_dia + 2 * args.wall + 6.0, args.knee_web_t),
+            "leg-foot": foot(args.rod_dia, args.wall, args.socket_len, 30.0, 5.0),
+        }
 
     env_profile = env.envelope_profile(env.PROP_DIAMETER_MM / 2, args.rotor_spacing,
                                        args.disc_thickness, tilt, pivot_offset, 10.0)
     env_bottom = min(z for r, z in env_profile if r > 0)
 
     args.output.mkdir(parents=True, exist_ok=True)
-    report = {"geometry": {"legs": args.legs, "stance_diameter_mm": 2 * args.knee_r,
-                           "overall_height_mm": args.attach_a_z - args.foot_z,
-                           "ground_clearance_under_rotors_mm": env_bottom - args.foot_z,
+    stance_r = args.straight_foot_r if args.style == "straight" else args.knee_r
+    foot_z = args.straight_foot_z if args.style == "straight" else args.foot_z
+    top_z = args.straight_attach_z if args.style == "straight" else args.attach_a_z
+    report = {"geometry": {"style": args.style, "legs": args.legs,
+                           "stance_diameter_mm": 2 * stance_r,
+                           "overall_height_mm": top_z - foot_z,
+                           "ground_clearance_under_rotors_mm": env_bottom - foot_z,
                            "combined_tilt_deg": tilt},
               "strut_checks": checks, "all_struts_clear": not fouled,
               "rod_total_length_mm": args.legs * sum(c["length_mm"] for c in checks.values()),
               "parts": {}, "not_analysed": [
-                  "Landing loads and rod buckling are not calculated. The knee now "
-                  "has a web across the truss plane, but its size is not from a "
-                  "stress result.",
+                  "Landing loads and rod buckling are not calculated. With one rod per "
+                  "leg the bracket carries the whole landing load through a single "
+                  "gusseted socket, and that gusset is not sized from a stress result.",
                   "Clearance is to the rod centreline; half the rod diameter still comes off it.",
               ], "offline_only": True}
 
@@ -207,8 +263,8 @@ def main(argv=None):
     (args.output / "landing-gear.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False), encoding="utf-8")
 
-    print(f"Landing gear  {args.legs} legs, stance {2 * args.knee_r:.0f} mm, "
-          f"rotor ground clearance {env_bottom - args.foot_z:.0f} mm")
+    print(f"Landing gear  {args.style}, {args.legs} legs, stance {2 * stance_r:.0f} mm, "
+          f"rotor ground clearance {env_bottom - foot_z:.0f} mm")
     for name, c in checks.items():
         print(f"  {name:18s} {c['length_mm']:6.0f} mm at {c['angle_from_vertical_deg']:5.1f} deg  "
               f"clearance {c['min_clearance_mm']:+7.1f} mm at z={c['at_z_mm']:+6.0f}  "

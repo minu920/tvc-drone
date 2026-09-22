@@ -91,7 +91,10 @@ def bulkhead(outer_dia, thickness, bore, spine_bcd, spine_holes, spine_dia,
                          (bore / 2 + outer_dia / 2) / 2 * math.sin(a)).circle(wire_dia / 2)
     ring = ring.cut(cut.extrude(thickness * 6, both=True))
 
-    # Clearance for the shell split flanges at the split plane.
+    # Clearance for the shell split flanges at the split plane. Skipped when there is
+    # no shell to clear.
+    if flange_width <= 0 or flange_thickness <= 0:
+        return ring
     notch = (cq.Workplane("XY")
              .rect(outer_dia, 2 * flange_thickness + 0.6)
              .extrude(thickness * 6, both=True)
@@ -157,6 +160,10 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--body-od", type=float, default=90.0)
+    p.add_argument("--no-shell", action="store_true",
+                   help="Bare carbon frame: no split-flange notches, own ring diameter")
+    p.add_argument("--bulkhead-od", type=float, default=84.0,
+                   help="Ring outer diameter when --no-shell is set, mm")
     p.add_argument("--body-wall", type=float, default=1.2)
     p.add_argument("--bulkhead-thickness", type=float, default=4.0)
     p.add_argument("--bulkhead-bore", type=float, default=52.0)
@@ -200,13 +207,20 @@ def main(argv=None):
     env_bottom = min(z for r, z in profile if r > 0)
     leg_angle = math.degrees(math.atan2(foot[0] - attach[0], attach[1] - foot[1]))
 
+    # With no shell the ring sets its own diameter and needs no flange relief, because
+    # there is no split shell for it to drop into.
+    ring_od = args.bulkhead_od if args.no_shell else body_bore - 0.4
+    flange_w = 0.0 if args.no_shell else args.flange_width
+    flange_t = 0.0 if args.no_shell else args.flange_thickness
     parts = {
-        "bulkhead": bulkhead(body_bore - 0.4, args.bulkhead_thickness, args.bulkhead_bore,
+        "bulkhead": bulkhead(ring_od, args.bulkhead_thickness, args.bulkhead_bore,
                              args.spine_bcd, args.spine_holes, args.spine_dia,
                              args.gimbal_bcd, 6, args.insert_bcd, args.insert_count,
-                             args.flange_width, args.flange_thickness,
+                             flange_w, flange_t,
                              args.wire_dia, args.wire_count),
-        "battery-tray": battery_tray(L, W, H, args.tray_wall, body_bore - 0.6, args.strap_width),
+        "battery-tray": battery_tray(L, W, H, args.tray_wall,
+                                     (ring_od if args.no_shell else body_bore) - 0.6,
+                                     args.strap_width),
     }
     counts = {"bulkhead": 4, "battery-tray": 1}
 
