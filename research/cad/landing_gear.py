@@ -173,7 +173,7 @@ def main(argv=None):
     # Attaches at the top bulkhead station. Foot radius is set for about 15 mm of
     # centreline clearance, not the bare minimum that just touches: half the rod
     # diameter comes off that, and the sweep model itself carries assumptions.
-    p.add_argument("--straight-attach-z", type=float, default=280.0)
+    p.add_argument("--straight-attach-z", type=float, default=290.0)
     p.add_argument("--straight-attach-r", type=float, default=25.0)
     p.add_argument("--straight-foot-r", type=float, default=290.0)
     p.add_argument("--straight-foot-z", type=float, default=-185.0)

@@ -1,19 +1,17 @@
-"""Generate the airframe internals and landing gear, offline.
+"""Generate the airframe internals, offline.
 
-Three groups of parts:
+  bulkhead      rings carrying the carbon spine, locating the gimbal, mounting the board
+  battery tray  a cradle for the selected pack
 
-  bulkhead    rings that carry the carbon spine, locate the gimbal and mount electronics
-  battery tray a cradle for the selected pack
-  landing gear brackets and feet for carbon strut legs
+Landing gear lives in landing_gear.py.
 
-The legs are printed end fittings on bought carbon rod rather than printed struts. A strut
-long enough to clear the rotors would be a 260 mm printed beam loaded in bending, which is
-the worst case for layer adhesion, and the baseline specification already puts structural
-loads in carbon rather than in printed parts.
+Ring diameters and bolt circles are checked against each other rather than trusted.
+Shrinking the ring for the bare-frame build once left 0.3 mm of rim outside the gimbal
+bolt circle, which prints as nothing, so check_walls() now refuses to emit a ring whose
+holes leave under 2 mm anywhere.
 
-Leg geometry is checked against the propeller sweep envelope rather than against the
-propeller diameter. The swept volume is wider than the rotor disc, so clearing 305 mm is
-not enough: the strut has to stay outside the swept profile at every height it passes.
+The board mounting pattern is read off the flight controller rather than guessed: four M3
+holes on a 62.04 mm circle at plus/minus 73.0 and plus/minus 107.2 degrees.
 """
 import argparse
 import json
@@ -23,43 +21,39 @@ from pathlib import Path
 import cadquery as cq
 
 import features as F
-import prop_sweep_envelope as env
 
 DENSITY = {"PLA": 1.24, "PETG": 1.27, "ABS": 1.04, "ASA": 1.07, "PA-CF": 1.10}
 M3_CLEARANCE = 3.4
 
 
-def envelope_radius_at(profile, z):
-    """Largest envelope radius at a height, or 0 below or above the swept volume."""
-    best = 0.0
-    for (r0, z0), (r1, z1) in zip(profile, profile[1:]):
-        if min(z0, z1) <= z <= max(z0, z1) and abs(z1 - z0) > 1e-9:
-            f = (z - z0) / (z1 - z0)
-            best = max(best, r0 + f * (r1 - r0))
-    return best
 
 
-def check_leg(attach, foot, spacing, thickness, tilt_deg, pivot_offset, samples=240):
-    """Minimum radial gap between the strut centreline and the swept rotors.
+def check_walls(outer_dia, bore, features, minimum=2.0):
+    """Reject a ring whose holes leave too little material to survive printing.
 
-    Uses the exact sweep test rather than the revolved keep-out solid. That solid fills the
-    notch near the axis on purpose, which would report a foul for anything close in, the
-    airframe included.
+    Reducing the ring diameter without rechecking the bolt circles on it left 0.3 mm of rim
+    outside the gimbal holes, which prints as nothing. A ring is cheap to resize and
+    expensive to discover broken after assembly, so this is an error rather than a warning.
     """
-    worst, worst_z = float("inf"), None
-    radius = env.PROP_DIAMETER_MM / 2
-    for i in range(samples + 1):
-        f = i / samples
-        r = attach[0] + f * (foot[0] - attach[0])
-        z = attach[1] + f * (foot[1] - attach[1])
-        gap = env.sweep_clearance((r, z), radius, spacing, thickness, tilt_deg, pivot_offset)
-        if gap < worst:
-            worst, worst_z = gap, z
-    return worst, worst_z
+    problems = []
+    for name, bcd, hole_dia in features:
+        outer_wall = outer_dia / 2 - (bcd / 2 + hole_dia / 2)
+        inner_wall = (bcd / 2 - hole_dia / 2) - bore / 2
+        if outer_wall < minimum:
+            problems.append(f"{name}: {outer_wall:.2f} mm to the rim")
+        if inner_wall < minimum:
+            problems.append(f"{name}: {inner_wall:.2f} mm to the bore")
+    if problems:
+        raise ValueError(
+            f"Ring {outer_dia:.1f} mm outer / {bore:.1f} mm bore leaves under "
+            f"{minimum} mm of wall: " + "; ".join(problems))
+    return [{"feature": n, "bcd_mm": b, "hole_dia_mm": d,
+             "wall_to_rim_mm": outer_dia / 2 - (b / 2 + d / 2),
+             "wall_to_bore_mm": (b / 2 - d / 2) - bore / 2} for n, b, d in features]
 
 
 def bulkhead(outer_dia, thickness, bore, spine_bcd, spine_holes, spine_dia,
-             mount_bcd, mount_holes, insert_bcd, insert_count, flange_width,
+             mount_bcd, mount_holes, insert_bcd, insert_angles, flange_width,
              flange_thickness, wire_dia, wire_count):
     """Universal bay ring: carries the spine, takes the gimbal and leg brackets, passes wires.
 
@@ -67,11 +61,18 @@ def bulkhead(outer_dia, thickness, bore, spine_bcd, spine_holes, spine_dia,
     gimbal and legs come off repeatedly. Notches at the split plane clear the shell's
     internal bolting flanges, without which the bulkhead cannot drop into a closed half.
     """
+    walls = check_walls(outer_dia, bore, [
+        ("spine", spine_bcd, spine_dia),
+        ("gimbal mount", mount_bcd, M3_CLEARANCE),
+        ("insert boss", insert_bcd, F.INSERT_M3["boss_dia"]),
+    ])
     ring = cq.Workplane("XY").circle(outer_dia / 2).circle(bore / 2).extrude(thickness)
 
-    # Insert bosses stand proud of the ring so there is wall around each insert.
-    for i in range(insert_count):
-        a = 2 * math.pi * i / insert_count + math.pi / insert_count
+    # Insert bosses stand proud of the ring so there is wall around each insert. The
+    # angles come from the flight controller's own mounting holes rather than an even
+    # spacing, so the board bolts straight down onto a bulkhead.
+    for a_deg in insert_angles:
+        a = math.radians(a_deg)
         ring = ring.union(F.insert_boss(height=F.INSERT_M3["depth"] + 1.5)
                           .translate((insert_bcd / 2 * math.cos(a),
                                       insert_bcd / 2 * math.sin(a), 0)))
@@ -94,14 +95,14 @@ def bulkhead(outer_dia, thickness, bore, spine_bcd, spine_holes, spine_dia,
     # Clearance for the shell split flanges at the split plane. Skipped when there is
     # no shell to clear.
     if flange_width <= 0 or flange_thickness <= 0:
-        return ring
+        return ring, walls
     notch = (cq.Workplane("XY")
              .rect(outer_dia, 2 * flange_thickness + 0.6)
              .extrude(thickness * 6, both=True)
              .intersect(cq.Workplane("XY").circle(outer_dia / 2)
                         .circle(outer_dia / 2 - flange_width - 0.4)
                         .extrude(thickness * 6, both=True)))
-    return ring.cut(notch)
+    return ring.cut(notch), walls
 
 
 def battery_tray(pack_l, pack_w, pack_h, wall, body_bore, strap_width):
@@ -122,38 +123,6 @@ def battery_tray(pack_l, pack_w, pack_h, wall, body_bore, strap_width):
     return tray
 
 
-def leg_bracket(rod_dia, angle_deg, plate_l, plate_w, plate_t, clamp_len, wall):
-    """Bolts flat to a bulkhead face; holds the carbon rod at the leg angle."""
-    plate = cq.Workplane("XY").box(plate_l, plate_w, plate_t, centered=(True, True, False))
-    cut = cq.Workplane("XY")
-    for sx in (-1, 1):
-        for sy in (-1, 1):
-            cut = cut.moveTo(sx * plate_l * 0.3, sy * plate_w * 0.28).circle(M3_CLEARANCE / 2)
-    plate = plate.cut(cut.extrude(plate_t * 3, both=True))
-
-    a = math.radians(angle_deg)
-    boss_od = rod_dia + 2 * wall
-    boss = (cq.Workplane("XZ").workplane(offset=-boss_od / 2)
-            .circle(boss_od / 2).extrude(boss_od)
-            .rotate((0, 0, 0), (0, 1, 0), 0))
-    boss = (cq.Workplane("XY").transformed(rotate=(0, angle_deg, 0))
-            .circle(boss_od / 2).extrude(clamp_len))
-    bore = (cq.Workplane("XY").transformed(rotate=(0, angle_deg, 0))
-            .circle(rod_dia / 2).extrude(clamp_len * 1.2))
-    return plate.union(boss.translate((0, 0, plate_t - 0.1))).cut(
-        bore.translate((0, 0, plate_t - 0.1)))
-
-
-def leg_foot(rod_dia, socket_len, wall, pad_dia, pad_t, angle_deg):
-    a = math.radians(angle_deg)
-    pad = cq.Workplane("XY").circle(pad_dia / 2).extrude(pad_t)
-    socket = (cq.Workplane("XY").workplane(offset=pad_t)
-              .transformed(rotate=(0, -angle_deg, 0))
-              .circle((rod_dia + 2 * wall) / 2).extrude(socket_len))
-    bore = (cq.Workplane("XY").workplane(offset=pad_t)
-            .transformed(rotate=(0, -angle_deg, 0))
-            .circle(rod_dia / 2).extrude(socket_len - wall))
-    return pad.union(socket).cut(bore)
 
 
 def main(argv=None):
@@ -162,11 +131,13 @@ def main(argv=None):
     p.add_argument("--body-od", type=float, default=90.0)
     p.add_argument("--no-shell", action="store_true",
                    help="Bare carbon frame: no split-flange notches, own ring diameter")
-    p.add_argument("--bulkhead-od", type=float, default=84.0,
+    p.add_argument("--bulkhead-od", type=float, default=88.0,
                    help="Ring outer diameter when --no-shell is set, mm")
     p.add_argument("--body-wall", type=float, default=1.2)
     p.add_argument("--bulkhead-thickness", type=float, default=4.0)
-    p.add_argument("--bulkhead-bore", type=float, default=52.0)
+    # 48 mm keeps 2 mm of wall everywhere. The battery cannot pass this bore either
+    # way (55 mm diagonal), so it lives in the bay between two stations instead.
+    p.add_argument("--bulkhead-bore", type=float, default=48.0)
     p.add_argument("--spine-holes", type=int, default=4)
     p.add_argument("--spine-dia", type=float, default=8.2, help="Carbon spine tube, 8 mm nominal")
     p.add_argument("--spine-bcd", type=float, default=70.0)
@@ -174,50 +145,35 @@ def main(argv=None):
     p.add_argument("--pack", type=str, default="137x44x33")
     p.add_argument("--tray-wall", type=float, default=2.4)
     p.add_argument("--strap-width", type=float, default=16.0)
-    p.add_argument("--insert-bcd", type=float, default=62.0,
-                   help="Bolt circle for the heat-set inserts the legs and gimbal use")
-    p.add_argument("--insert-count", type=int, default=6)
+    # Read off the flight controller board: four M3 holes on a 62.04 mm circle at
+    # plus/minus 73.0 and plus/minus 107.2 degrees.
+    p.add_argument("--insert-bcd", type=float, default=62.04,
+                   help="Bolt circle for the heat-set inserts, matching the FC board")
+    p.add_argument("--insert-angles", type=str, default="73.0,107.2,253.0,287.0",
+                   help="Insert angles in degrees, matching the FC mounting holes")
     p.add_argument("--flange-width", type=float, default=8.0)
     p.add_argument("--flange-thickness", type=float, default=3.0)
     p.add_argument("--wire-dia", type=float, default=9.0)
     p.add_argument("--wire-count", type=int, default=3)
-    p.add_argument("--leg-count", type=int, default=4)
-    p.add_argument("--leg-rod-dia", type=float, default=8.2)
-    p.add_argument("--leg-attach-r", type=float, default=43.0)
-    p.add_argument("--leg-attach-z", type=float, default=-15.0)
-    p.add_argument("--leg-foot-r", type=float, default=215.0)
-    p.add_argument("--leg-foot-z", type=float, default=-215.0)
-    p.add_argument("--rotor-offset", type=float, default=58.0)
-    p.add_argument("--rotor-spacing", type=float, default=64.0)
-    p.add_argument("--per-axis-deg", type=float, default=15.0)
     p.add_argument("--output", type=Path, default=Path("artifacts/cad"))
     args = p.parse_args(argv)
 
     body_bore = args.body_od - 2 * args.body_wall
     L, W, H = (float(v) for v in args.pack.lower().split("x"))
 
-    # Envelope for the final gimbal geometry, used to check the legs.
-    pivot_offset = args.rotor_offset + args.rotor_spacing / 2.0
-    tilt = env.combined_tilt_deg(args.per_axis_deg)
-    profile = env.envelope_profile(env.PROP_DIAMETER_MM / 2, args.rotor_spacing, 20.0,
-                                   tilt, pivot_offset, 10.0)
-    attach = (args.leg_attach_r, args.leg_attach_z)
-    foot = (args.leg_foot_r, args.leg_foot_z)
-    gap, gap_z = check_leg(attach, foot, args.rotor_spacing, 20.0, tilt, pivot_offset)
-    env_bottom = min(z for r, z in profile if r > 0)
-    leg_angle = math.degrees(math.atan2(foot[0] - attach[0], attach[1] - foot[1]))
-
     # With no shell the ring sets its own diameter and needs no flange relief, because
     # there is no split shell for it to drop into.
     ring_od = args.bulkhead_od if args.no_shell else body_bore - 0.4
     flange_w = 0.0 if args.no_shell else args.flange_width
     flange_t = 0.0 if args.no_shell else args.flange_thickness
+
+    insert_angles = [float(v) for v in args.insert_angles.split(",")]
+    ring, walls = bulkhead(ring_od, args.bulkhead_thickness, args.bulkhead_bore,
+                           args.spine_bcd, args.spine_holes, args.spine_dia,
+                           args.gimbal_bcd, 6, args.insert_bcd, insert_angles,
+                           flange_w, flange_t, args.wire_dia, args.wire_count)
     parts = {
-        "bulkhead": bulkhead(ring_od, args.bulkhead_thickness, args.bulkhead_bore,
-                             args.spine_bcd, args.spine_holes, args.spine_dia,
-                             args.gimbal_bcd, 6, args.insert_bcd, args.insert_count,
-                             flange_w, flange_t,
-                             args.wire_dia, args.wire_count),
+        "bulkhead": ring,
         "battery-tray": battery_tray(L, W, H, args.tray_wall,
                                      (ring_od if args.no_shell else body_bore) - 0.6,
                                      args.strap_width),
@@ -225,24 +181,22 @@ def main(argv=None):
     counts = {"bulkhead": 4, "battery-tray": 1}
 
     args.output.mkdir(parents=True, exist_ok=True)
-    report = {"landing_gear": {
-                  "leg_count": args.leg_count, "leg_angle_from_vertical_deg": leg_angle,
-                  "attach_rz_mm": list(attach), "foot_rz_mm": list(foot),
-                  "strut_length_mm": math.dist(attach, foot),
-                  "stance_diameter_mm": 2 * args.leg_foot_r,
-                  "envelope_bottom_z_mm": env_bottom,
-                  "ground_clearance_mm": env_bottom - args.leg_foot_z,
-                  "min_strut_to_envelope_mm": gap, "worst_case_z_mm": gap_z,
-                  "clears_envelope": gap > 0},
-              "fasteners": {
-                  "insert": "M3 heat-set, 4.0 mm pilot hole, 6.7 mm deep, 8 mm boss",
-                  "shell_interface": "notched at the split plane to clear the shell flanges",
-                  "wire": "round pass-throughs; a slot would concentrate stress"},
+    report = {"bulkhead_walls_mm": walls,
+              "fc_mounting": {"bolt_circle_mm": args.insert_bcd,
+                              "angles_deg": insert_angles,
+                              "hole_dia_mm": 3.2,
+                              "source": "read from resources/pcb/rera.kicad_pcb"},
+              "battery_clearance": {
+                  "pack_mm": [L, W, H], "bore_mm": args.bulkhead_bore,
+                  "pack_diagonal_mm": (W ** 2 + H ** 2) ** 0.5,
+                  "passes_through_bore": (W ** 2 + H ** 2) ** 0.5 <= args.bulkhead_bore,
+                  "note": "The pack does not fit through a bulkhead, so it has to live in "
+                          "a bay between two stations rather than being threaded through."},
               "parts": {}, "assumptions": [
-                  "Strut clearance is measured to the rod centreline, so half the rod "
-                  "diameter plus any ball-link hardware still has to come off it.",
-                  "Leg stiffness and buckling are not analysed; rod size is a starting pick.",
-                  "Landing loads are not analysed.",
+                  "Ring diameters and bolt circles are checked against each other, but no "
+                  "load case sizes them.",
+                  "The board mounting pattern is read from the PCB file, not measured off "
+                  "a physical board.",
               ], "offline_only": True}
 
     total = 0.0
@@ -262,14 +216,12 @@ def main(argv=None):
     (args.output / "airframe-parts.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False), encoding="utf-8")
 
-    lg = report["landing_gear"]
-    print(f"Airframe parts  body bore {body_bore:.1f} mm, pack {L:.0f}x{W:.0f}x{H:.0f} mm")
-    print(f"  landing gear: {args.leg_count} legs at {leg_angle:.1f} deg from vertical, "
-          f"strut {lg['strut_length_mm']:.0f} mm, stance {lg['stance_diameter_mm']:.0f} mm")
-    print(f"    envelope bottom {env_bottom:.1f} mm, feet at {args.leg_foot_z:.0f} mm "
-          f"-> ground clearance {lg['ground_clearance_mm']:.1f} mm")
-    print(f"    strut to envelope: {gap:+.1f} mm at z={gap_z:.0f}  "
-          f"({'clears' if gap > 0 else 'FOULS'})")
+    print(f"Airframe parts  ring {ring_od:.1f} mm outer, bore {args.bulkhead_bore:.0f} mm, "
+          f"pack {L:.0f}x{W:.0f}x{H:.0f} mm")
+    print("  wall check:")
+    for w in walls:
+        print(f"    {w['feature']:14s} BCD {w['bcd_mm']:6.2f}  rim {w['wall_to_rim_mm']:5.2f}  "
+              f"bore {w['wall_to_bore_mm']:5.2f} mm")
     print(f"  {'part':14s} {'qty':>4s} {'ea cm3':>8s} {'ASA ea':>7s} {'ASA tot':>8s}   bbox")
     for name, d in report["parts"].items():
         print(f"  {name:14s} {d['count']:4d} {d['volume_cm3']:8.1f} "

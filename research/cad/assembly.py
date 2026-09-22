@@ -61,7 +61,7 @@ def main(argv=None):
     p.add_argument("--attach-c-z", type=float, default=30.0)
     p.add_argument("--stations", type=str, default="",
                    help="Comma-separated bulkhead z positions; blank uses the shell layout")
-    p.add_argument("--straight-attach-z", type=float, default=280.0)
+    p.add_argument("--straight-attach-z", type=float, default=290.0)
     p.add_argument("--straight-foot-r", type=float, default=290.0)
     p.add_argument("--straight-foot-z", type=float, default=-185.0)
     p.add_argument("--rod-dia", type=float, default=8.0)
