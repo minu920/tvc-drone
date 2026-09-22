@@ -115,6 +115,30 @@ def _trunnions(solid, axis, start_dia, reach, boss_dia):
     return solid.union(_rot_z(cyl, axis))
 
 
+def _trunnion_backing(solid, axis, bore_r, tip, half_w, ring_height, spec=F.INSERT_M3):
+    """Material behind a trunnion, on the bore side, so its insert pocket has a wall.
+
+    A stub on a ring can only reach as far as the running clearance to the bore it turns
+    inside, which here is 1 mm on a 4 mm annulus: 5 mm of material against the 6.7 mm the
+    insert needs. Widening the annulus is not available either, because the bore has to
+    stay large enough for the member turning inside it.
+
+    So the wall is added inward instead, as a local pad at the two trunnion stations only,
+    rather than by thickening the whole ring. It projects into the bore, which is free
+    space on this axis: the member inside turns about the perpendicular axis, so it sweeps
+    nowhere near these two spots.
+    """
+    short = max(0.0, spec["depth"] - (tip - bore_r)) + 1.0
+    if short <= 1.0:
+        return solid
+    half_h = min(half_w, ring_height / 2.0)
+    pad = (cq.Workplane("XY").workplane(offset=-half_h)
+           .center(bore_r - short / 2.0, 0).rect(short, 2 * half_w)
+           .extrude(2 * half_h))
+    pad = pad.union(pad.mirror("YZ"))
+    return solid.union(_rot_z(pad, axis))
+
+
 def _trunnion_pockets(solid, axis, tip, spec=F.INSERT_M3):
     """Cut the heat-set insert pockets in the trunnion end faces. MUST BE CALLED LAST.
 
@@ -140,22 +164,41 @@ def _trunnion_pockets(solid, axis, tip, spec=F.INSERT_M3):
     return solid
 
 
-def trunnion_pocket_depth(solid, axis, tip, spec=F.INSERT_M3, step=0.1):
-    """Measure how deep a pocket actually reaches, by probing the finished solid.
+def trunnion_pocket_depth(solid, axis, tip, spec=F.INSERT_M3, step=0.1, probes=8):
+    """Measure how much SUPPORTED bore a pocket really has, by probing the finished solid.
 
     The depth is a consequence of several unrelated features meeting on one axis, so it is
     measured rather than declared. An insert pressed into a pocket shallower than its own
     length sits proud and the joint never closes.
+
+    What has to be measured is the wall, not the void. Walking the axis and stopping at the
+    first solid point measures air, and a ring's own open bore is air too: that test
+    reported a full 6.7 mm for a pocket whose wall stopped after 5.06 mm and then opened
+    into the bore, where an insert has nothing to grip and would push straight through.
+    So each station is checked by probing a circle of points just outside the pilot radius.
+    The supported depth ends at the first station where that wall is not there.
     """
     body = solid.val() if hasattr(solid, "val") else solid
     sol = body.Solids()[0]
-    ang = {"X": 0.0, "Y": 90.0}[axis]
-    a = math.radians(ang)
+    a = math.radians({"X": 0.0, "Y": 90.0}[axis])
+    # Unit vectors: along the pocket axis, and the two directions across it.
+    ax = (math.cos(a), math.sin(a), 0.0)
+    u = (-math.sin(a), math.cos(a), 0.0)
+    v = (0.0, 0.0, 1.0)
+    r_wall = spec["hole_dia"] / 2 + 0.3
     depth = 0.0
     while depth < spec["depth"] + step:
         d = depth + step / 2
-        pt = cq.Vector((tip - d) * math.cos(a), (tip - d) * math.sin(a), 0.0)
-        if sol.isInside(pt, 1e-6):
+        c = [ax[i] * (tip - d) for i in range(3)]
+        walled = True
+        for k in range(probes):
+            th = 2 * math.pi * k / probes
+            pt = cq.Vector(*[c[i] + r_wall * (math.cos(th) * u[i] + math.sin(th) * v[i])
+                             for i in range(3)])
+            if not sol.isInside(pt, 1e-6):
+                walled = False
+                break
+        if not walled:
             break
         depth += step
     return depth
@@ -272,10 +315,19 @@ def build(a):
     inner = _trunnions(inner, "Y", a.inner_od,
                        (a.outer_id - a.inner_od) / 2 - a.running_clearance,
                        a.boss_dia)
+    inner = _trunnion_backing(inner, "Y", a.inner_id / 2, inner_tip,
+                              a.boss_dia / 2, a.ring_height)
     # The lever hangs from the pivot axis but must not reach past the bore of the ring
     # turning around it. Placed at inner_od/2 its outer edge sat 2 mm inside the outer
     # ring's annulus, so the two interfered and the gimbal could not turn.
-    lever_r = a.inner_id / 2 - a.lever_width / 2 - a.running_clearance
+    #
+    # It must still meet its OWN annulus. Subtracting the running clearance here as well
+    # applied a clearance between two features of one part, leaving a 0.94 mm slot between
+    # the lever and the annulus exactly where the trunnion pocket passes: the bore wall
+    # stopped after 5.06 mm and the insert had nothing to grip beyond that. The lever now
+    # butts the bore, and its outer edge at inner_id/2 is still well clear of the outer
+    # ring's annulus.
+    lever_r = a.inner_id / 2 - a.lever_width / 2
     inner = inner.union(_lever("Y", lever_r, a.gimbal_lever, a.lever_width,
                                a.lever_thickness, BALL_LINK_BORE))
     # Stops for the cradle, reaching below the ring onto the arm shoulder pads.
@@ -288,7 +340,14 @@ def build(a):
     parts["inner-ring"] = inner
 
     # Cradle: arms on the inner axis reaching down to the motor plate.
-    prof = [(a.arm_x_top - a.arm_thickness / 2, 0.0), (a.arm_x_top + a.arm_thickness / 2, 0.0),
+    # The arm has to rise ABOVE the pivot axis, not stop at it. The trunnion boss needs
+    # material all round it to hold an insert, and with the profile topping out at z = 0
+    # the upper half of the pocket opened straight into air: the supported bore measured
+    # 1.0 mm against the 6.7 mm the insert needs. The rise is the boss radius plus the
+    # minimum wall that insert wants.
+    arm_rise = a.boss_dia / 2 + F.INSERT_M3["min_wall"]
+    prof = [(a.arm_x_top - a.arm_thickness / 2, arm_rise),
+            (a.arm_x_top + a.arm_thickness / 2, arm_rise),
             (a.arm_x_bot + a.arm_thickness / 2, plate_z), (a.arm_x_bot - a.arm_thickness / 2, plate_z)]
     arm = cq.Workplane("XZ").polyline(prof).close().extrude(a.arm_width / 2, both=True)
     cradle = arm.union(arm.mirror("YZ"))

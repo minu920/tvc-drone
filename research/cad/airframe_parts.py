@@ -52,6 +52,56 @@ def check_walls(outer_dia, bore, features, minimum=2.0):
              "wall_to_bore_mm": (b / 2 - d / 2) - bore / 2} for n, b, d in features]
 
 
+def check_hole_spacing(placed, minimum=2.0):
+    """Reject a ring whose holes are too close to EACH OTHER.
+
+    check_walls compares every bolt circle with the rim and the bore, and passing it says
+    nothing about two features on different circles colliding. Three wiring holes placed at
+    a fixed angular offset put one of them 6.35 mm from an insert boss whose radii sum to
+    8.5 mm, so the Ø9 hole ate 2.15 mm into the boss and that insert had no wall left at
+    all. The audit found it only because the pocket then measured 0.0 mm.
+    """
+    problems = []
+    for i in range(len(placed)):
+        ni, xi, yi, di = placed[i]
+        for j in range(i + 1, len(placed)):
+            nj, xj, yj, dj = placed[j]
+            gap = math.hypot(xi - xj, yi - yj) - (di + dj) / 2
+            if gap < minimum:
+                problems.append(f"{ni} and {nj}: {gap:.2f} mm apart")
+    if problems:
+        raise ValueError(
+            f"Features on this ring come within {minimum} mm of each other: "
+            + "; ".join(problems))
+    return True
+
+
+def place_clear_holes(count, radius, hole_dia, fixed, minimum=2.0, step_deg=1.0):
+    """Angles for `count` holes at `radius` that clear everything already on the ring.
+
+    Placing them at an even spacing plus a constant offset is what collided with an insert
+    boss. Candidate angles are scanned instead, the ones that clear every fixed feature are
+    kept, and the requested number is chosen greedily to be as far apart as possible.
+    """
+    cand = []
+    for k in range(int(360 / step_deg)):
+        a = math.radians(k * step_deg)
+        x, y = radius * math.cos(a), radius * math.sin(a)
+        if all(math.hypot(x - fx, y - fy) - (hole_dia + fd) / 2 >= minimum
+               for _, fx, fy, fd in fixed):
+            cand.append(k * step_deg)
+    if len(cand) < count:
+        raise ValueError(
+            f"Only {len(cand)} of {int(360/step_deg)} angles at r={radius:.1f} mm clear the "
+            f"existing features by {minimum} mm; cannot place {count} holes of "
+            f"Ø{hole_dia} mm. Move them to another radius or use fewer.")
+    sep = lambda a, b: min(abs(a - b), 360 - abs(a - b))
+    chosen = [cand[0]]
+    while len(chosen) < count:
+        chosen.append(max(cand, key=lambda c: min(sep(c, p) for p in chosen)))
+    return chosen
+
+
 def bulkhead(outer_dia, thickness, bore, spine_bcd, spine_holes, spine_dia,
              mount_bcd, mount_holes, insert_bcd, insert_angles, flange_width,
              flange_thickness, wire_dia, wire_count):
@@ -77,19 +127,30 @@ def bulkhead(outer_dia, thickness, bore, spine_bcd, spine_holes, spine_dia,
                           .translate((insert_bcd / 2 * math.cos(a),
                                       insert_bcd / 2 * math.sin(a), 0)))
 
+    # Everything already committed to this ring, as (name, x, y, diameter).
+    placed = [(f"insert boss {a:.0f} deg",
+               insert_bcd / 2 * math.cos(math.radians(a)),
+               insert_bcd / 2 * math.sin(math.radians(a)),
+               F.INSERT_M3["boss_dia"]) for a in insert_angles]
     cut = cq.Workplane("XY")
     for i in range(spine_holes):
         a = 2 * math.pi * i / spine_holes + math.pi / spine_holes
-        cut = cut.moveTo(spine_bcd / 2 * math.cos(a),
-                         spine_bcd / 2 * math.sin(a)).circle(spine_dia / 2)
+        x, y = spine_bcd / 2 * math.cos(a), spine_bcd / 2 * math.sin(a)
+        placed.append((f"spine {i}", x, y, spine_dia))
+        cut = cut.moveTo(x, y).circle(spine_dia / 2)
     for i in range(mount_holes):
         a = 2 * math.pi * i / mount_holes
-        cut = cut.moveTo(mount_bcd / 2 * math.cos(a),
-                         mount_bcd / 2 * math.sin(a)).circle(M3_CLEARANCE / 2)
-    for i in range(wire_count):
-        a = 2 * math.pi * i / wire_count + 0.4
-        cut = cut.moveTo((bore / 2 + outer_dia / 2) / 2 * math.cos(a),
-                         (bore / 2 + outer_dia / 2) / 2 * math.sin(a)).circle(wire_dia / 2)
+        x, y = mount_bcd / 2 * math.cos(a), mount_bcd / 2 * math.sin(a)
+        placed.append((f"gimbal mount {i}", x, y, M3_CLEARANCE))
+        cut = cut.moveTo(x, y).circle(M3_CLEARANCE / 2)
+    wire_r = (bore / 2 + outer_dia / 2) / 2
+    wire_angles = place_clear_holes(wire_count, wire_r, wire_dia, placed)
+    for i, a_deg in enumerate(wire_angles):
+        a = math.radians(a_deg)
+        x, y = wire_r * math.cos(a), wire_r * math.sin(a)
+        placed.append((f"wire {i}", x, y, wire_dia))
+        cut = cut.moveTo(x, y).circle(wire_dia / 2)
+    check_hole_spacing(placed)
     ring = ring.cut(cut.extrude(thickness * 6, both=True))
 
     # Clearance for the shell split flanges at the split plane. Skipped when there is
