@@ -47,8 +47,12 @@ def main(argv=None):
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--parts", type=Path, default=Path("../../artifacts/cad"))
     p.add_argument("--output", type=Path, default=Path("../../artifacts/cad"))
-    p.add_argument("--no-shell", action="store_true",
-                   help="Bare carbon frame: skip the skirt, body halves, nose and fins")
+    # The vehicle is a bare frame: the shell was dropped for mass, so that is the
+    # default rather than an opt-in. Leaving it opt-out meant a plain run rebuilt the
+    # shell, and in airframe_parts it also derived the bulkhead from the shell bore
+    # and tripped check_walls.
+    p.add_argument("--shell", action="store_true",
+                   help="Rebuild the aerodynamic shell and size parts to its bore")
     p.add_argument("--body-z", type=float, default=50.0)
     p.add_argument("--body-length", type=float, default=320.0)
     p.add_argument("--legs", type=int, default=3)
@@ -61,8 +65,11 @@ def main(argv=None):
     p.add_argument("--attach-r", type=float, default=34.0)
     p.add_argument("--attach-a-z", type=float, default=140.0)
     p.add_argument("--attach-c-z", type=float, default=30.0)
-    p.add_argument("--stations", type=str, default="",
-                   help="Comma-separated bulkhead z positions; blank uses the shell layout")
+    # Driven by what has to fit between them, not by even spacing: the gimbal and servos
+    # below, then a 170 mm bay for the 137 mm pack, then the leg ring at the top. The old
+    # blank default derived these from the shell body, which no longer exists.
+    p.add_argument("--stations", type=str, default="30,90,260,320",
+                   help="Comma-separated bulkhead z positions")
     p.add_argument("--straight-attach-z", type=float, default=320.0)
     p.add_argument("--straight-foot-r", type=float, default=290.0)
     p.add_argument("--straight-foot-z", type=float, default=-185.0)
@@ -85,10 +92,12 @@ def main(argv=None):
     p.add_argument("--spine-overhang", type=float, default=12.0,
                    help="How far the spine runs past the end stations, mm")
     args = p.parse_args(argv)
+    args.no_shell = not args.shell
 
     stations = ([float(v) for v in args.stations.split(",")] if args.stations
                 else [args.body_z + args.body_length * f
                       for f in (0.04, 0.34, 0.64, 0.93)])
+    stations = sorted(stations)
     leg_az = [360.0 * i / args.legs for i in range(args.legs)]
 
     def on_ring(radius, z):

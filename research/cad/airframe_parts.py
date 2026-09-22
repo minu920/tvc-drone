@@ -159,8 +159,12 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--body-od", type=float, default=90.0)
-    p.add_argument("--no-shell", action="store_true",
-                   help="Bare carbon frame: no split-flange notches, own ring diameter")
+    # The vehicle is a bare frame: the shell was dropped for mass, so that is the
+    # default rather than an opt-in. Leaving it opt-out meant a plain run rebuilt the
+    # shell, and in airframe_parts it also derived the bulkhead from the shell bore
+    # and tripped check_walls.
+    p.add_argument("--shell", action="store_true",
+                   help="Rebuild the aerodynamic shell and size parts to its bore")
     p.add_argument("--bulkhead-od", type=float, default=88.0,
                    help="Ring outer diameter when --no-shell is set, mm")
     p.add_argument("--body-wall", type=float, default=1.2)
@@ -187,6 +191,7 @@ def main(argv=None):
     p.add_argument("--wire-count", type=int, default=3)
     p.add_argument("--output", type=Path, default=Path("artifacts/cad"))
     args = p.parse_args(argv)
+    args.no_shell = not args.shell
 
     body_bore = args.body_od - 2 * args.body_wall
     L, W, H = (float(v) for v in args.pack.lower().split("x"))

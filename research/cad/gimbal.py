@@ -107,23 +107,58 @@ def _bore_axis(solid, axis, outer_dia, bearing=F.BEARING_683):
     return solid
 
 
-def _trunnions(solid, axis, start_dia, reach, boss_dia, spec=F.INSERT_M3):
-    """Stub shafts on one axis, each with a heat-set insert in its end face.
+def _trunnions(solid, axis, start_dia, reach, boss_dia):
+    """Stub shafts on one axis. The insert pockets are cut separately, see below."""
+    cyl = (cq.Workplane("YZ").workplane(offset=start_dia / 2)
+           .circle(boss_dia / 2).extrude(reach))
+    cyl = cyl.union(cyl.mirror("YZ"))
+    return solid.union(_rot_z(cyl, axis))
+
+
+def _trunnion_pockets(solid, axis, tip, spec=F.INSERT_M3):
+    """Cut the heat-set insert pockets in the trunnion end faces. MUST BE CALLED LAST.
 
     An M3 screw runs from outside through the bearing bore and threads into the insert, so
     the same screw is the pivot pin and sets the axial preload on the inner race. Screwing
     into bare plastic here would strip, and this joint comes apart often.
+
+    Two things made this pocket 3 mm deep instead of 6.7 when it was cut inside _trunnions.
+    The hole ran the wrong way: insert_hole() rises along +Z and was rotated +90*s about Y,
+    which sends it along +x*s, straight out of the tip into fresh air, so early versions cut
+    nothing at all and both trunnions printed solid. Once that was negated it cut inward but
+    bottomed out, because the stub is only 1 mm long on a 4 mm annulus, and because the
+    lever is unioned onto this same axis afterwards and refilled what had been cut.
+
+    Cutting last turns the second problem into the solution: the lever root is the backing
+    material the stub does not have on its own, and the pocket reaches full depth without
+    any part growing. Nothing may be unioned onto this axis after this call.
     """
-    tip = start_dia / 2 + reach
-    cyl = (cq.Workplane("YZ").workplane(offset=start_dia / 2)
-           .circle(boss_dia / 2).extrude(reach))
-    cyl = cyl.union(cyl.mirror("YZ"))
-    solid = solid.union(_rot_z(cyl, axis))
     for s in (+1, -1):
-        hole = (F.insert_hole(spec).rotate((0, 0, 0), (0, 1, 0), 90 * s)
+        hole = (F.insert_hole(spec).rotate((0, 0, 0), (0, 1, 0), -90 * s)
                 .translate((s * tip, 0, 0)))
         solid = solid.cut(_rot_z(hole, axis))
     return solid
+
+
+def trunnion_pocket_depth(solid, axis, tip, spec=F.INSERT_M3, step=0.1):
+    """Measure how deep a pocket actually reaches, by probing the finished solid.
+
+    The depth is a consequence of several unrelated features meeting on one axis, so it is
+    measured rather than declared. An insert pressed into a pocket shallower than its own
+    length sits proud and the joint never closes.
+    """
+    body = solid.val() if hasattr(solid, "val") else solid
+    sol = body.Solids()[0]
+    ang = {"X": 0.0, "Y": 90.0}[axis]
+    a = math.radians(ang)
+    depth = 0.0
+    while depth < spec["depth"] + step:
+        d = depth + step / 2
+        pt = cq.Vector((tip - d) * math.cos(a), (tip - d) * math.sin(a), 0.0)
+        if sol.isInside(pt, 1e-6):
+            break
+        depth += step
+    return depth
 
 
 def _bolt_circle(solid, bcd, count, dia, height):
@@ -233,6 +268,7 @@ def build(a):
     # The trunnion is a stub that must stop short of the ring turning around it: the pin
     # spans the rest through the bearing. Reaching into the mating bore instead makes the
     # two solids interfere and the gimbal cannot turn.
+    inner_tip = a.inner_od / 2 + (a.outer_id - a.inner_od) / 2 - a.running_clearance
     inner = _trunnions(inner, "Y", a.inner_od,
                        (a.outer_id - a.inner_od) / 2 - a.running_clearance,
                        a.boss_dia)
@@ -247,6 +283,8 @@ def build(a):
                          a.arm_x_top + a.arm_thickness / 2 + 3.0, arm_stop_z,
                          (a.inner_id + a.inner_od) / 4.0,
                          (a.inner_od - a.inner_id) / 2.0)
+    # Last, so the lever root backs the pocket instead of refilling it.
+    inner = _trunnion_pockets(inner, "Y", inner_tip)
     parts["inner-ring"] = inner
 
     # Cradle: arms on the inner axis reaching down to the motor plate.
@@ -257,6 +295,7 @@ def build(a):
     cradle = cradle.union(cq.Workplane("XY").workplane(offset=plate_z)
                           .circle(a.plate_dia / 2).extrude(a.plate_thickness / 2, both=True))
     arm_outer = a.arm_x_top + a.arm_thickness / 2
+    cradle_tip = a.inner_id / 2 - a.running_clearance
     cradle = _trunnions(cradle, "X", 2 * arm_outer,
                         a.inner_id / 2 - arm_outer - a.running_clearance,
                         a.boss_dia)
@@ -281,6 +320,8 @@ def build(a):
            .center(arm_x_at_lever, -a.gimbal_lever)
            .circle(BALL_LINK_BORE / 2).extrude(2 * a.arm_width))
     cradle = cradle.cut(rod)
+    # Last: the stop pads land on this same axis and would otherwise refill the pockets.
+    cradle = _trunnion_pockets(cradle, "X", cradle_tip)
     parts["cradle"] = cradle
 
     parts["servo-bracket"] = servo_bracket(a.servo_l, a.servo_w, a.servo_flange_span,
@@ -420,8 +461,23 @@ def main(argv=None):
     t = report["total"]
     print(f"  {'TOTAL':15s} {t['volume_cm3']:9.1f} {t['mass_g']['ASA']:7.1f} {t['mass_g']['PA-CF']:8.1f}")
     print(f"  wrote STEP/STL per part to {args.output.resolve()}")
+    shallow = 0
+    # Same expressions the builder uses: both tips stop one running clearance short of the
+    # bore they turn inside.
+    for name, axis, tip in (("inner-ring", "Y", args.outer_id / 2 - args.running_clearance),
+                            ("cradle", "X", args.inner_id / 2 - args.running_clearance)):
+        got = trunnion_pocket_depth(parts[name], axis, tip)
+        need = F.INSERT_M3["depth"]
+        ok = got >= need - 0.05
+        flag = "ok" if ok else f"TOO SHALLOW, insert needs {need} mm"
+        print(f"  {name} insert pocket {got:.1f} mm deep at r={tip:.1f} mm -> {flag}")
+        shallow += 0 if ok else 1
     print("Structure only. Pushrods, bearings, retention and hard stops are bought or "
           "not designed, so this mass is a floor.")
+    if shallow:
+        print(f"{shallow} insert pocket(s) too shallow. An insert pressed into a pocket "
+              f"shorter than itself sits proud and the pivot never closes. Not printable.")
+        return 2
     return 0
 
 
