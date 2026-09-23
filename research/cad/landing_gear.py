@@ -29,6 +29,8 @@ import math
 from pathlib import Path
 
 import cadquery as cq
+from OCP.BRepAdaptor import BRepAdaptor_Surface
+from OCP.GeomAbs import GeomAbs_SurfaceType
 
 import prop_sweep_envelope as env
 
@@ -49,13 +51,127 @@ def strut_clearance(p0, p1, spacing, thickness, tilt_deg, pivot_offset, samples=
     return worst, worst_z
 
 
-def _rod_socket(rod_dia, wall, length, angle_deg):
-    """Blind socket for a carbon rod, rising from the XY plane at an angle from vertical."""
+def bore_floor(solid, rod_dia):
+    """The point the rod seats against, and the socket depth, in part coordinates."""
+    body = solid.val() if hasattr(solid, "val") else solid
+    sol = body.Solids()[0]
+    best = None
+    for f in sol.Faces():
+        a = BRepAdaptor_Surface(f.wrapped)
+        if a.GetType() != GeomAbs_SurfaceType.GeomAbs_Cylinder:
+            continue
+        c = a.Cylinder()
+        if abs(2 * c.Radius() - rod_dia) > 0.05:
+            continue
+        bb = f.BoundingBox()
+        span = math.sqrt(bb.xlen ** 2 + bb.ylen ** 2 + bb.zlen ** 2)
+        if best is None or span > best[2]:
+            v, q = c.Axis().Direction(), c.Axis().Location()
+            best = ((v.X(), v.Y(), v.Z()), (q.X(), q.Y(), q.Z()), span, f)
+    if best is None:
+        return None, 0.0
+    ax, loc, _, face = best
+    ts = [sum((v.toTuple()[k] - loc[k]) * ax[k] for k in range(3))
+          for v in face.Vertices()]
+    t0, t1 = min(ts), max(ts)
+    ends = {}
+    for tt, lbl, off in ((t0, "lo", -0.6), (t1, "hi", 0.6)):
+        pt = cq.Vector(*[loc[k] + ax[k] * (tt + off) for k in range(3)])
+        ends[lbl] = sol.isInside(pt, 1e-6)
+    if ends["lo"] and not ends["hi"]:
+        tf, tm = t0, t1
+    elif ends["hi"] and not ends["lo"]:
+        tf, tm = t1, t0
+    else:
+        return None, 0.0
+    return tuple(loc[k] + ax[k] * tf for k in range(3)), abs(tm - tf)
+
+
+def rod_cut_length(bracket, foot, attach_xyz, foot_xyz, rod_dia):
+    """How long to actually cut the carbon, floor of one socket to floor of the other.
+
+    The straight-line distance between the two placement points is not the rod length:
+    each fitting swallows part of the rod, and the sockets' floors sit inboard of the
+    points the legs are laid out from. Reporting the layout span instead sends you to the
+    saw with a rod about 10 mm too long per leg.
+    """
+    fb, _ = bore_floor(bracket, rod_dia)
+    ff, _ = bore_floor(foot, rod_dia)
+    if fb is None or ff is None:
+        return None
+    a = [attach_xyz[k] + fb[k] for k in range(3)]
+    b = [foot_xyz[k] + ff[k] for k in range(3)]
+    return math.sqrt(sum((a[k] - b[k]) ** 2 for k in range(3)))
+
+
+def rod_fit(solid, rod_dia, clearance=0.2):
+    """Check that a straight rod can actually be inserted, and how far it grips.
+
+    A socket is easy to draw and easy to get wrong in a way no rendering shows: the bore
+    can end up capped at the end the rod arrives from, or blocked by the plate it hangs
+    off. Both fittings shipped that way, sealed at both ends along their own axis.
+
+    So the rod is simulated: an actual cylinder of the rod's real diameter, seated on the
+    floor of the bore and withdrawn along the axis, intersected with the part. Anything but
+    an empty intersection means it does not go in.
+
+    Returns (fits, engagement_mm, collision_mm3).
+    """
+    body = solid.val() if hasattr(solid, "val") else solid
+    sol = body.Solids()[0]
+    bore = None
+    for f in sol.Faces():
+        a = BRepAdaptor_Surface(f.wrapped)
+        if a.GetType() != GeomAbs_SurfaceType.GeomAbs_Cylinder:
+            continue
+        c = a.Cylinder()
+        if abs(2 * c.Radius() - rod_dia) > 0.05:
+            continue
+        bb = f.BoundingBox()
+        span = math.sqrt(bb.xlen ** 2 + bb.ylen ** 2 + bb.zlen ** 2)
+        if bore is None or span > bore[2]:
+            v, q = c.Axis().Direction(), c.Axis().Location()
+            bore = ((v.X(), v.Y(), v.Z()), (q.X(), q.Y(), q.Z()), span)
+    if bore is None:
+        return False, 0.0, 0.0
+    ax, loc, engagement = bore
+    best = (False, engagement, None)
+    for sgn in (-1, 1):
+        d = tuple(sgn * ax[k] for k in range(3))
+        tilt = math.degrees(math.atan2(d[0], d[2]))
+        rod = (cq.Workplane("XY").transformed(rotate=(0, tilt, 0))
+               .circle((rod_dia - clearance) / 2).extrude(250.0).translate(loc))
+        hit = cq.Workplane().add(sol).intersect(rod)
+        vol = hit.val().Volume() if hit.val().Solids() else 0.0
+        if best[2] is None or vol < best[2]:
+            best = (vol < 1.0, engagement, vol)
+    return best
+
+
+def _rod_socket(rod_dia, wall, length, angle_deg, breakout=1.5):
+    """Blind socket for a carbon rod, rising from the XY plane at an angle from vertical.
+
+    The bore is open at the FAR end and floored at the near end, because that is the end
+    the rod arrives from: the socket hangs off a plate or a pad, and the rod comes in from
+    outside. Built the obvious way the two ends come out swapped. Shortening the bore by
+    `wall` from a base at the origin closes the far tip, which is exactly where the rod has
+    to enter, and leaves the bore running into the plate at the near end.
+
+    That near end does not open either. The bore's base disc is perpendicular to the tilted
+    axis while the plate's face is flat, so the disc cuts the plate at a slant and leaves a
+    wedge of plate material lying over the mouth. Both parts measured 237 mm3 of material
+    sitting on the rod's path, and the rod could not be inserted at all.
+
+    So the bore starts `wall` along the axis, which puts a floor between it and the plate
+    for the rod to seat against, and runs past the far end by `breakout` so the mouth is a
+    clean opening rather than a tangent.
+    """
     od = rod_dia + 2 * wall
     boss = (cq.Workplane("XY").transformed(rotate=(0, angle_deg, 0))
             .circle(od / 2).extrude(length))
     bore = (cq.Workplane("XY").transformed(rotate=(0, angle_deg, 0))
-            .circle(rod_dia / 2).extrude(length - wall))
+            .workplane(offset=wall)
+            .circle(rod_dia / 2).extrude(length - wall + breakout))
     return boss, bore
 
 
@@ -299,6 +415,32 @@ def main(argv=None):
               f"{d['mass_total_g']['ASA']:8.1f}   {d['bbox_mm']}")
     print(f"  {'TOTAL printed':20s} {'':4s} {'':8s} {report['total']['mass_g']['ASA']:8.1f}")
     print(f"  wrote STEP/STL to {args.output.resolve()}")
+
+    # Can the rod actually be inserted? Both fittings once had a bore capped at the end
+    # the rod arrives from, which nothing else in this script would have caught.
+    for name in ("leg-bracket", "leg-foot", "leg-knee", "leg-bracket-upper",
+                 "leg-bracket-lower"):
+        if name not in parts:
+            continue
+        fits, engagement, collision = rod_fit(parts[name], args.rod_dia)
+        note = ("ok" if fits else
+                f"BLOCKED, {collision:.0f} mm3 of material on the rod's path")
+        print(f"  {name:20s} rod Ø{args.rod_dia - 0.2:.1f} enters "
+              f"{engagement:5.1f} mm  -> {note}")
+        if not fits:
+            fouled.append(f"{name}: the rod cannot be inserted")
+    if args.style == "straight" and "leg-bracket" in parts and "leg-foot" in parts:
+        cut = rod_cut_length(parts["leg-bracket"], parts["leg-foot"],
+                             (args.straight_attach_r, 0.0, args.straight_attach_z),
+                             (args.straight_foot_r, 0.0, args.straight_foot_z),
+                             args.rod_dia)
+        if cut:
+            report["rod_cut_length_mm"] = cut
+            report["rod_cut_total_mm"] = cut * args.legs
+            print(f"  CUT THE CARBON TO {cut:.0f} mm per leg "
+                  f"({cut * args.legs / 1000:.2f} m for {args.legs}); the "
+                  f"{report['rod_total_length_mm'] / args.legs:.0f} mm above is the "
+                  f"layout span between attachment points, not the cut length")
     if fouled:
         print("  FAIL: " + ", ".join(fouled))
         return 2
