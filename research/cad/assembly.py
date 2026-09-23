@@ -77,6 +77,11 @@ def main(argv=None):
     p.add_argument("--boss-height", type=float, default=8.2,
                    help="How far the bulkhead insert bosses stand proud, mm")
     p.add_argument("--bracket-plate-t", type=float, default=5.0)
+    p.add_argument("--servo-r", type=float, default=43.0,
+                   help="Radius the servo bracket's foot sits at, mm")
+    p.add_argument("--servo-azimuths", type=str, default="0,90")
+    p.add_argument("--servo-foot-z", type=float, default=49.85,
+                   help="Placement z; the foot face lands 15.85 mm below this")
     p.add_argument("--servo-z", type=float, default=38.0)
     p.add_argument("--servo-pitch", type=float, default=22.0,
                    help="Axial spacing between the two servo brackets, mm")
@@ -110,15 +115,25 @@ def main(argv=None):
         "gimbal-inner-ring": IDENTITY,
         "gimbal-cradle": IDENTITY,
         # Placed here.
-        "bulkhead": [(0.0, 0.0, z, 0.0) for z in stations],
+        # Each station carries a different set of interfaces, so each has its own ring.
+        "bulkhead-gimbal": [(0.0, 0.0, stations[0], 0.0)],
+        "bulkhead-battery": [(0.0, 0.0, stations[1], 0.0)],
+        "bulkhead-plain": [(0.0, 0.0, stations[2], 0.0)],
+        "bulkhead-leg": [(0.0, 0.0, stations[3], 0.0)],
         # Flange bolts onto the insert bosses, so it stands off the ring by their height.
         "battery-tray": [(0.0, 0.0, args.tray_z + args.boss_height, 0.0)],
         # Servos sit just above the gimbal. The linkage offset is axial, not radial:
         # 60 mm radially would put the servo outside the body.
-        # Two servos, stacked rather than stacked on top of each other: both were
-        # previously placed at the identical point and differed only by rotation.
-        "gimbal-servo-bracket": [(0.0, 0.0, args.servo_z, 0.0),
-                                 (0.0, 0.0, args.servo_z + args.servo_pitch, 90.0)],
+        # Tipped 90 deg so the bracket's wall becomes a foot on the bulkhead and its plate
+        # stands up: the servo shaft then lies horizontal, which is what the pushrod needs,
+        # and the two bolts through that wall finally have a face to land on. Bolted flat
+        # and unrotated, as before, the wall stood vertical with nothing anywhere in the
+        # vehicle to meet it - the surface it was drawn for was the shell's inner wall.
+        "gimbal-servo-bracket": [
+            (args.servo_r * math.cos(math.radians(az)),
+             args.servo_r * math.sin(math.radians(az)),
+             args.servo_foot_z, az - 90.0, 90.0)
+            for az in (float(v) for v in args.servo_azimuths.split(","))],
     }
     if not args.no_shell:
         layout.update({
@@ -148,8 +163,13 @@ def main(argv=None):
         shape = cq.importers.importStep(str(step))
         volume = shape.val().Volume()
         solids = len(shape.solids().vals())
-        for n, (x, y, z, rz) in enumerate(places):
-            moved = shape.rotate((0, 0, 0), (0, 0, 1), rz).translate((x, y, z))
+        for n, place in enumerate(places):
+            x, y, z, rz = place[:4]
+            rx = place[4] if len(place) > 4 else 0.0
+            # rx first, then rz: a part is tipped onto the face it bolts to, and only then
+            # swung round to its azimuth.
+            moved = shape.rotate((0, 0, 0), (1, 0, 0), rx) if rx else shape
+            moved = moved.rotate((0, 0, 0), (0, 0, 1), rz).translate((x, y, z))
             placed.append((f"{stem}#{n}" if len(places) > 1 else stem, moved))
         bom.append({"part": stem, "count": len(places),
                     "volume_cm3": volume / 1000.0,
@@ -228,8 +248,10 @@ def main(argv=None):
               "printed_mass_asa_g": printed_total,
               # Where every piece ended up, so downstream checks (bolt alignment, motion)
               # use the same layout rather than re-deriving it and drifting from it.
-              "placements": {n: [{"xyz_mm": [round(x, 3), round(y, 3), round(z, 3)],
-                                  "rz_deg": round(rz, 3)} for (x, y, z, rz) in places]
+              "placements": {n: [{"xyz_mm": [round(q[0], 3), round(q[1], 3), round(q[2], 3)],
+                                  "rz_deg": round(q[3], 3),
+                                  "rx_deg": round(q[4] if len(q) > 4 else 0.0, 3)}
+                                 for q in places]
                              for n, places in layout.items()},
               "interference": {"pairs": clashes, "tolerance_mm3": args.clash_tol},
               "steps_with_stray_solids": stray,

@@ -29,7 +29,8 @@ from OCP.GeomAbs import GeomAbs_SurfaceType
 
 import features as F
 
-PARTS = ["gimbal-outer-ring", "gimbal-inner-ring", "gimbal-cradle", "bulkhead",
+PARTS = ["gimbal-outer-ring", "gimbal-inner-ring", "gimbal-cradle", "bulkhead-gimbal",
+         "bulkhead-battery", "bulkhead-plain", "bulkhead-leg",
          "battery-tray", "gimbal-servo-bracket", "leg-bracket", "leg-foot", "fit-coupon"]
 
 # hole diameter -> (what goes in, its diameter, blind is acceptable)

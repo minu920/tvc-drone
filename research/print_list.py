@@ -35,9 +35,16 @@ PARTS_KR = {
                       "모터 2개가 하단 플레이트에 직결된다. 추력 25.5 N 전체와 "
                       "반작용 토크가 이 부품의 팔을 지나 트러니언으로 나간다. "
                       "가장 하중이 큰 출력 부품."),
-    "bulkhead": ("벌크헤드 (격벽)",
-                 "4개 전부 동일 부품. z = 30 / 90 / 260 / 320 mm에 배치되고 "
-                 "8 mm 카본 스파인 4본이 관통한다. 기체의 골격."),
+    "bulkhead-gimbal": ("벌크헤드 — 짐벌 station (z=30)",
+                        "짐벌을 M3 스탠드오프 25 mm 4개로 매달고, 서보 브래킷 2개의 "
+                        "발판을 받는다. 스파인 4본 관통."),
+    "bulkhead-battery": ("벌크헤드 — 배터리 station (z=90)",
+                         "배터리 트레이가 볼트되는 인서트 보스 4개(BCD 62.04)를 "
+                         "가진다. PCB도 같은 패턴."),
+    "bulkhead-plain": ("벌크헤드 — 중간 station (z=260)",
+                       "스파인과 배선 구멍만 있는 기본 링."),
+    "bulkhead-leg": ("벌크헤드 — 랜딩기어 station (z=320)",
+                     "다리 브래킷 3개 × 볼트 4개를 받는다. 착륙 하중이 여기로 들어온다."),
     "battery-tray": ("배터리 트레이",
                      "4S 팩(137×44×33 mm)을 기체 축방향으로 세워 고정한다. "
                      "착륙 충격 시 팩 관성을 받는다."),
@@ -53,7 +60,8 @@ PARTS_KR = {
                    "683ZZ 베어링 시트 2종이 한 장에 들어있다."),
 }
 
-ORDER = ["fit-coupon", "bulkhead", "leg-bracket", "leg-foot", "gimbal-outer-ring",
+ORDER = ["fit-coupon", "bulkhead-plain", "bulkhead-leg", "bulkhead-battery",
+         "bulkhead-gimbal", "leg-bracket", "leg-foot", "gimbal-outer-ring",
          "gimbal-inner-ring", "gimbal-cradle", "gimbal-servo-bracket", "battery-tray"]
 
 EXCLUDED = [

@@ -30,7 +30,8 @@ BOUGHT = {
     # The motor bolts to the underside of the cradle plate: rectangular 16x19 pattern.
     "gimbal-cradle": lambda at, d: abs(d[2]) > 0.9 and at[2] < -80.0,
     # The MG996R's own flange bolts, on the plate. The two holes through the wall are what
-    # actually holds the bracket to the airframe, and those must mate.
+    # actually holds the bracket to the airframe, and those must mate. Judged in the part's
+    # own frame, where the flange bolts run along Z and the wall bolts along Y.
     "gimbal-servo-bracket": lambda at, d: abs(d[2]) > 0.9,
 }
 
@@ -72,8 +73,17 @@ def features(solid, dia):
     return out
 
 
-def place(d, loc, rz_deg, xyz):
-    """Rotate about Z then translate, matching assembly.py."""
+def place(d, loc, rz_deg, xyz, rx_deg=0.0):
+    """Rotate about X, then about Z, then translate - exactly as assembly.py does.
+
+    Leaving the X rotation out silently reported a part that is tipped onto its side at the
+    position it would occupy lying flat, which put the servo bracket's foot bolts 6 mm off
+    radially and 26 mm off in height and made a correct pattern look like a mismatch.
+    """
+    b = math.radians(rx_deg)
+    cb, sb = math.cos(b), math.sin(b)
+    d = (d[0], d[1] * cb - d[2] * sb, d[1] * sb + d[2] * cb)
+    loc = (loc[0], loc[1] * cb - loc[2] * sb, loc[1] * sb + loc[2] * cb)
     a = math.radians(rz_deg)
     ca, sa = math.cos(a), math.sin(a)
     rd = (d[0] * ca - d[1] * sa, d[0] * sa + d[1] * ca, d[2])
@@ -116,13 +126,15 @@ def main(argv=None):
             continue
         for idx, pl in enumerate(places):
             xyz, rz = pl["xyz_mm"], pl["rz_deg"]
+            rx = pl.get("rx_deg", 0.0)
             for kind in ("clear", "insert"):
                 for (d, loc, lo, hi) in cache[name][kind]:
-                    wd, wl = place(d, loc, rz, xyz)
+                    wd, wl = place(d, loc, rz, xyz, rx)
                     world.append({"part": name, "inst": idx, "kind": kind,
                                   "d": wd, "p": wl, "d_local": d,
                                   "at_local": tuple(round(loc[i] + d[i] * (lo + hi) / 2, 1)
                                                     for i in range(3)),
+                                  "rx": rx,
                                   "at": tuple(round(wl[i] + wd[i] * (lo + hi) / 2, 1)
                                               for i in range(3))})
 

@@ -50,6 +50,9 @@ MOTOR_OD = 42.25
 # Treating it as two full circles of four puts holes 1.5 mm apart with 3.4 mm
 # clearance, so the cutters overlap and the boolean leaves plugs behind.
 MOTOR_HOLES = ((0.0, 8.0), (0.0, -8.0), (9.5, 0.0), (-9.5, 0.0))
+# Where the outer ring bolts to the airframe. airframe_parts.py --mount-angles must
+# match these, or not one of the four bolts lines up.
+MOUNT_ANGLES = (30.0, 150.0, 210.0, 330.0)
 M3_CLEARANCE = 3.4
 BALL_LINK_BORE = 3.2
 
@@ -204,10 +207,17 @@ def trunnion_pocket_depth(solid, axis, tip, spec=F.INSERT_M3, step=0.1, probes=8
     return depth
 
 
-def _bolt_circle(solid, bcd, count, dia, height):
+def _bolt_circle(solid, bcd, angles_deg, dia, height):
+    """Mounting holes at named angles, not an even count.
+
+    Six evenly spaced holes looked tidy and gave four usable ones: the pair at 0/180 lands
+    inside the hard-stop risers and the pair at 90/270 is cut through by the bearing bosses,
+    leaving 3.1 mm stubs that no bolt can use. Naming the four that are actually clear stops
+    the airframe being drilled for two holes that were never joints.
+    """
     cut = cq.Workplane("XY")
-    for i in range(count):
-        a = 2 * math.pi * i / count + math.pi / count
+    for a_deg in angles_deg:
+        a = math.radians(a_deg)
         cut = cut.moveTo(bcd / 2 * math.cos(a), bcd / 2 * math.sin(a)).circle(dia / 2)
     return solid.cut(cut.extrude(height * 3, both=True))
 
@@ -268,7 +278,8 @@ def _lever(axis, radius, length, width, thickness, ball_bore):
     return _rot_z(arm, "X" if axis == "Y" else "Y")
 
 
-def servo_bracket(body_l, body_w, flange_span, flange_pitch, plate_t, pad_w, wall_h):
+def servo_bracket(body_l, body_w, flange_span, flange_pitch, plate_t, pad_w, wall_h,
+                  foot_bolt_span=28.0):
     """Plate that traps an MG996R-class servo body, with a wall to bolt against a ring."""
     plate = (cq.Workplane("XY").box(flange_span + 10, pad_w, plate_t, centered=(True, True, False))
              .cut(cq.Workplane("XY").box(body_l + 0.6, body_w + 0.6, plate_t * 4,
@@ -281,9 +292,12 @@ def servo_bracket(body_l, body_w, flange_span, flange_pitch, plate_t, pad_w, wal
     wall = (cq.Workplane("XY")
             .box(flange_span + 10, plate_t, wall_h, centered=(True, True, False))
             .translate((0, -pad_w / 2 + plate_t / 2, 0)))
+    # The wall's two bolts are what hold the bracket to the airframe. Spacing them off the
+    # servo's own flange span put them at r=43.58 once placed, 0.42 mm from the bulkhead
+    # rim, so they are spaced to sit on the ring instead of to match the servo.
     holes = cq.Workplane("XZ").workplane(offset=pad_w / 2)
     for sx in (-1, 1):
-        holes = holes.moveTo(sx * (flange_span / 2 + 2), wall_h * 0.6).circle(M3_CLEARANCE / 2)
+        holes = holes.moveTo(sx * foot_bolt_span / 2, wall_h * 0.6).circle(M3_CLEARANCE / 2)
     return plate.union(wall).cut(holes.extrude(-pad_w * 2))
 
 
@@ -298,7 +312,8 @@ def build(a):
     outer = _ring(a.outer_id, a.outer_od, a.ring_height)
     outer = _axis_boss(outer, "Y", a.outer_id, a.outer_od, a.boss_dia)
     outer = _bore_axis(outer, "Y", a.outer_od)
-    outer = _bolt_circle(outer, a.airframe_bcd, 6, M3_CLEARANCE, a.ring_height)
+    outer = _bolt_circle(outer, a.airframe_bcd, MOUNT_ANGLES, M3_CLEARANCE,
+                         a.ring_height)
     # Stop-screw bosses, on the axis the inner ring rotates across.
     outer = _stop_screws(outer, "Y", a.ring_height / 2.0, stop_r, stop_z,
                          (a.outer_id + a.outer_od) / 4.0,

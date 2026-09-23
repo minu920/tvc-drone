@@ -76,30 +76,68 @@ def check_hole_spacing(placed, minimum=2.0):
     return True
 
 
-def place_clear_holes(count, radius, hole_dia, fixed, minimum=2.0, step_deg=1.0):
-    """Angles for `count` holes at `radius` that clear everything already on the ring.
+def place_clear_holes(count, radii, hole_dia, fixed, minimum=2.0, step_deg=1.0):
+    """Radius and angles for `count` holes that clear everything already on the ring.
 
     Placing them at an even spacing plus a constant offset is what collided with an insert
-    boss. Candidate angles are scanned instead, the ones that clear every fixed feature are
-    kept, and the requested number is chosen greedily to be as far apart as possible.
+    boss. Candidate positions are scanned instead, the ones that clear every fixed feature
+    are kept, and the requested number is chosen greedily to be as far apart as possible.
+
+    The radius is searched as well as the angle. Fixing it and searching only angles leaves
+    the result at the mercy of whatever else happens to sit on that circle: moving the
+    gimbal bolts onto their real positions narrowed the free windows at r=34 until only two
+    of the three wiring holes would fit.
     """
-    cand = []
-    for k in range(int(360 / step_deg)):
-        a = math.radians(k * step_deg)
-        x, y = radius * math.cos(a), radius * math.sin(a)
-        if all(math.hypot(x - fx, y - fy) - (hole_dia + fd) / 2 >= minimum
-               for _, fx, fy, fd in fixed):
-            cand.append(k * step_deg)
-    if len(cand) < count:
+    best = None
+    for radius in radii:
+        cand = []
+        for k in range(int(360 / step_deg)):
+            a = math.radians(k * step_deg)
+            x, y = radius * math.cos(a), radius * math.sin(a)
+            if all(math.hypot(x - fx, y - fy) - (hole_dia + fd) / 2 >= minimum
+                   for _, fx, fy, fd in fixed):
+                cand.append(k * step_deg)
+        if len(cand) < count:
+            continue
+        try:
+            angles = _spread(cand, count, radius, hole_dia, minimum)
+        except ValueError:
+            continue
+        worst = min(math.dist(_xy(a, radius), _xy(b, radius)) - hole_dia
+                    for i, a in enumerate(angles) for b in angles[i + 1:])             if count > 1 else 1e9
+        if best is None or worst > best[2]:
+            best = (radius, angles, worst)
+    if best is None:
         raise ValueError(
-            f"Only {len(cand)} of {int(360/step_deg)} angles at r={radius:.1f} mm clear the "
-            f"existing features by {minimum} mm; cannot place {count} holes of "
-            f"Ø{hole_dia} mm. Move them to another radius or use fewer.")
-    sep = lambda a, b: min(abs(a - b), 360 - abs(a - b))
-    chosen = [cand[0]]
-    while len(chosen) < count:
-        chosen.append(max(cand, key=lambda c: min(sep(c, p) for p in chosen)))
+            f"Cannot place {count} holes of Ø{hole_dia} mm anywhere between r="
+            f"{min(radii):.1f} and {max(radii):.1f} mm while clearing the existing features "
+            f"and each other by {minimum} mm. Use fewer holes or a smaller diameter.")
+    return best[0], best[1]
+
+
+def _spread(cand, count, radius, hole_dia, minimum):
+    # Spreading them by angle alone is not enough: it maximises separation without ever
+    # requiring it, so when the free windows are narrow the last hole lands next to one
+    # already placed. Two wiring holes came out 1.64 mm apart that way. Each pick must
+    # actually clear the ones before it, and if none can, say so rather than overlap.
+    chosen = []
+    for _ in range(count):
+        ok = [c for c in cand
+              if all(math.dist(_xy(c, radius), _xy(p, radius)) - hole_dia >= minimum
+                     for p in chosen)]
+        if not ok:
+            raise ValueError(
+                f"Cannot place {count} holes of Ø{hole_dia} mm at r={radius:.1f} mm: "
+                f"{len(chosen)} fitted, and no angle clears both the existing features and "
+                f"the holes already placed by {minimum} mm. Use fewer, or move the radius.")
+        chosen.append(max(ok, key=lambda c: min(
+            [math.dist(_xy(c, radius), _xy(p, radius)) for p in chosen] or [1e9])))
     return chosen
+
+
+def _xy(angle_deg, radius):
+    a = math.radians(angle_deg)
+    return (radius * math.cos(a), radius * math.sin(a))
 
 
 def leg_bolt_positions(attach_r, bolt_radial, bolt_tang, azimuths):
@@ -121,52 +159,80 @@ def leg_bolt_positions(attach_r, bolt_radial, bolt_tang, azimuths):
     return pts
 
 
+def servo_bolt_positions(radial, span, azimuths):
+    """Where the tipped servo brackets' foot bolts land on a bulkhead.
+
+    The bracket is tipped 90 degrees so its wall becomes a foot; these are the two bolts
+    through that foot, at `radial` from the axis and `span` apart along the tangent.
+    """
+    pts = []
+    for az in azimuths:
+        a = math.radians(az)
+        for dt in (-span / 2, span / 2):
+            pts.append((radial * math.cos(a) - dt * math.sin(a),
+                        radial * math.sin(a) + dt * math.cos(a)))
+    return pts
+
+
 def bulkhead(outer_dia, thickness, bore, spine_bcd, spine_holes, spine_dia,
-             mount_bcd, mount_holes, insert_bcd, insert_angles, flange_width,
-             flange_thickness, wire_dia, wire_count, leg_bolts=()):
+             mount_bcd, mount_angles, insert_bcd, insert_angles, flange_width,
+             flange_thickness, wire_dia, wire_count, leg_bolts=(), servo_bolts=(),
+             with_gimbal=True, with_inserts=True):
     """Universal bay ring: carries the spine, takes the gimbal and leg brackets, passes wires.
 
     One part serves all four stations. Inserts rather than tapped plastic, because the
     gimbal and legs come off repeatedly. Notches at the split plane clear the shell's
     internal bolting flanges, without which the bulkhead cannot drop into a closed half.
     """
-    walls = check_walls(outer_dia, bore, [
-        ("spine", spine_bcd, spine_dia),
-        ("gimbal mount", mount_bcd, M3_CLEARANCE),
-        ("insert boss", insert_bcd, F.INSERT_M3["boss_dia"]),
-    ])
+    circles = [("spine", spine_bcd, spine_dia)]
+    if with_gimbal:
+        circles.append(("gimbal mount", mount_bcd, M3_CLEARANCE))
+    if with_inserts:
+        circles.append(("insert boss", insert_bcd, F.INSERT_M3["boss_dia"]))
+    walls = check_walls(outer_dia, bore, circles)
     ring = cq.Workplane("XY").circle(outer_dia / 2).circle(bore / 2).extrude(thickness)
 
     # Insert bosses stand proud of the ring so there is wall around each insert. The
     # angles come from the flight controller's own mounting holes rather than an even
     # spacing, so the board bolts straight down onto a bulkhead.
-    for a_deg in insert_angles:
-        a = math.radians(a_deg)
-        ring = ring.union(F.insert_boss(height=F.INSERT_M3["depth"] + 1.5)
-                          .translate((insert_bcd / 2 * math.cos(a),
-                                      insert_bcd / 2 * math.sin(a), 0)))
+    if with_inserts:
+        for a_deg in insert_angles:
+            a = math.radians(a_deg)
+            ring = ring.union(F.insert_boss(height=F.INSERT_M3["depth"] + 1.5)
+                              .translate((insert_bcd / 2 * math.cos(a),
+                                          insert_bcd / 2 * math.sin(a), 0)))
 
     # Everything already committed to this ring, as (name, x, y, diameter).
     placed = [(f"insert boss {a:.0f} deg",
                insert_bcd / 2 * math.cos(math.radians(a)),
                insert_bcd / 2 * math.sin(math.radians(a)),
-               F.INSERT_M3["boss_dia"]) for a in insert_angles]
+               F.INSERT_M3["boss_dia"]) for a in insert_angles] if with_inserts else []
     cut = cq.Workplane("XY")
     for i in range(spine_holes):
         a = 2 * math.pi * i / spine_holes + math.pi / spine_holes
         x, y = spine_bcd / 2 * math.cos(a), spine_bcd / 2 * math.sin(a)
         placed.append((f"spine {i}", x, y, spine_dia))
         cut = cut.moveTo(x, y).circle(spine_dia / 2)
-    for i in range(mount_holes):
-        a = 2 * math.pi * i / mount_holes
+    # The gimbal's own mounting holes are not evenly spaced: on the outer ring the six
+    # positions at 30 deg intervals are interrupted at 0/180 by the hard-stop risers and at
+    # 90/270 by the bearing bosses, leaving four usable ones. An evenly spaced circle here
+    # was clocked 30 deg away from every one of them, so not a single bolt lined up.
+    for i, a_deg in enumerate(mount_angles if with_gimbal else []):
+        a = math.radians(a_deg)
         x, y = mount_bcd / 2 * math.cos(a), mount_bcd / 2 * math.sin(a)
-        placed.append((f"gimbal mount {i}", x, y, M3_CLEARANCE))
+        placed.append((f"gimbal mount {a_deg:.0f}deg", x, y, M3_CLEARANCE))
         cut = cut.moveTo(x, y).circle(M3_CLEARANCE / 2)
     for i, (x, y) in enumerate(leg_bolts):
         placed.append((f"leg bolt {i}", x, y, M3_CLEARANCE))
         cut = cut.moveTo(x, y).circle(M3_CLEARANCE / 2)
-    wire_r = (bore / 2 + outer_dia / 2) / 2
-    wire_angles = place_clear_holes(wire_count, wire_r, wire_dia, placed)
+    for i, (x, y) in enumerate(servo_bolts):
+        placed.append((f"servo bolt {i}", x, y, M3_CLEARANCE))
+        cut = cut.moveTo(x, y).circle(M3_CLEARANCE / 2)
+    # Anywhere on the ring that leaves the minimum wall inside and out.
+    lo = bore / 2 + wire_dia / 2 + 2.0
+    hi = outer_dia / 2 - wire_dia / 2 - 2.0
+    wire_r, wire_angles = place_clear_holes(
+        wire_count, [lo + (hi - lo) * i / 20 for i in range(21)], wire_dia, placed)
     for i, a_deg in enumerate(wire_angles):
         a = math.radians(a_deg)
         x, y = wire_r * math.cos(a), wire_r * math.sin(a)
@@ -272,6 +338,12 @@ def main(argv=None):
     p.add_argument("--flange-thickness", type=float, default=3.0)
     # Must match landing_gear.py: --straight-attach-r, and the bracket bolt pattern
     # derived from --bracket-radial (0.28 of it) and --bracket-bolt-span.
+    # Must match the four usable positions on gimbal.py's outer ring.
+    p.add_argument("--mount-angles", type=str, default="30,150,210,330")
+    # Must match assembly.py --servo-r / --servo-azimuths and gimbal.py's foot bolt span.
+    p.add_argument("--servo-bolt-radial", type=float, default=34.6)
+    p.add_argument("--servo-bolt-span", type=float, default=28.0)
+    p.add_argument("--servo-azimuths", type=str, default="0,90")
     p.add_argument("--leg-attach-r", type=float, default=34.0)
     p.add_argument("--leg-bolt-radial", type=float, default=19.0 * 0.28)
     p.add_argument("--leg-bolt-span", type=float, default=30.0)
@@ -292,21 +364,39 @@ def main(argv=None):
     flange_t = 0.0 if args.no_shell else args.flange_thickness
 
     insert_angles = [float(v) for v in args.insert_angles.split(",")]
-    ring, walls = bulkhead(ring_od, args.bulkhead_thickness, args.bulkhead_bore,
-                           args.spine_bcd, args.spine_holes, args.spine_dia,
-                           args.gimbal_bcd, 6, args.insert_bcd, insert_angles,
-                           flange_w, flange_t, args.wire_dia, args.wire_count,
-                           leg_bolt_positions(
-                               args.leg_attach_r, args.leg_bolt_radial,
-                               args.leg_bolt_span,
-                               [float(v) for v in args.leg_azimuths.split(",")]))
-    parts = {
-        "bulkhead": ring,
-        "battery-tray": battery_tray(L, W, H, args.tray_wall,
-                                     (ring_od if args.no_shell else body_bore) - 0.6,
-                                     args.strap_width, args.insert_bcd, insert_angles),
+    # One universal ring carried every interface in the vehicle, and with the gimbal,
+    # servo and leg patterns all finally on it there is no longer room: the spacing check
+    # could not place them without collisions. Each station actually needs a different
+    # subset, so each gets its own ring. Still four printed pieces, just four files.
+    mount_angles = [float(v) for v in args.mount_angles.split(",")]
+    leg_bolts = leg_bolt_positions(args.leg_attach_r, args.leg_bolt_radial,
+                                   args.leg_bolt_span,
+                                   [float(v) for v in args.leg_azimuths.split(",")])
+    servo_bolts = servo_bolt_positions(args.servo_bolt_radial, args.servo_bolt_span,
+                                       [float(v) for v in args.servo_azimuths.split(",")])
+    stations = {
+        # name                      gimbal  inserts  legs        servos
+        "bulkhead-gimbal":         (True,  False,   (),         servo_bolts),
+        "bulkhead-battery":        (False, True,    (),         ()),
+        "bulkhead-plain":          (False, False,   (),         ()),
+        "bulkhead-leg":            (False, False,   leg_bolts,  ()),
     }
-    counts = {"bulkhead": 4, "battery-tray": 1}
+    parts, walls = {}, None
+    for name, (gim, ins, legs, servos) in stations.items():
+        ring, w = bulkhead(ring_od, args.bulkhead_thickness, args.bulkhead_bore,
+                           args.spine_bcd, args.spine_holes, args.spine_dia,
+                           args.gimbal_bcd, mount_angles,
+                           args.insert_bcd, insert_angles,
+                           flange_w, flange_t, args.wire_dia, args.wire_count,
+                           legs, servos, with_gimbal=gim, with_inserts=ins)
+        parts[name] = ring
+        if walls is None or len(w) > len(walls):
+            walls = w
+    parts["battery-tray"] = battery_tray(L, W, H, args.tray_wall,
+                                         (ring_od if args.no_shell else body_bore) - 0.6,
+                                         args.strap_width, args.insert_bcd, insert_angles)
+    counts = {n: 1 for n in stations}
+    counts["battery-tray"] = 1
 
     args.output.mkdir(parents=True, exist_ok=True)
     report = {"bulkhead_walls_mm": walls,
