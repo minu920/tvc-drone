@@ -321,13 +321,15 @@ def build(a):
     # turning around it. Placed at inner_od/2 its outer edge sat 2 mm inside the outer
     # ring's annulus, so the two interfered and the gimbal could not turn.
     #
-    # It must still meet its OWN annulus. Subtracting the running clearance here as well
-    # applied a clearance between two features of one part, leaving a 0.94 mm slot between
-    # the lever and the annulus exactly where the trunnion pocket passes: the bore wall
-    # stopped after 5.06 mm and the insert had nothing to grip beyond that. The lever now
-    # butts the bore, and its outer edge at inner_id/2 is still well clear of the outer
-    # ring's annulus.
-    lever_r = a.inner_id / 2 - a.lever_width / 2
+    # It also has to stay clear of the stop-screw insert, which sits just outside the bore
+    # on this same axis. I once moved the lever out by the running clearance to make it
+    # butt its own annulus, on the theory that its root would back the trunnion pocket.
+    # It does not - the lever hangs below the pivot plane and contributes nothing there,
+    # and the pocket is backed by _trunnion_backing instead. What that move did do was push
+    # the lever's outer edge from y=31 to y=32, into the Ø4 insert pocket spanning
+    # 31.2..35.2, so a soldering tip could no longer reach that one insert. The lever is on
+    # +radius only, so the defect appeared on one stop screw and not its mirror.
+    lever_r = a.inner_id / 2 - a.lever_width / 2 - a.running_clearance
     inner = inner.union(_lever("Y", lever_r, a.gimbal_lever, a.lever_width,
                                a.lever_thickness, BALL_LINK_BORE))
     # Stops for the cradle, reaching below the ring onto the arm shoulder pads.

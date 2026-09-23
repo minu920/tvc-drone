@@ -102,9 +102,28 @@ def place_clear_holes(count, radius, hole_dia, fixed, minimum=2.0, step_deg=1.0)
     return chosen
 
 
+def leg_bolt_positions(attach_r, bolt_radial, bolt_tang, azimuths):
+    """Where the landing-gear brackets' bolts land on a bulkhead.
+
+    The bracket plate is narrow radially and long tangentially, and its four bolts sit at
+    +-bolt_radial radially and +-bolt_tang/2 tangentially about the attachment radius. The
+    bulkhead had no holes at any of these points, so the brackets that carry the entire
+    landing load had nothing to bolt into: the pattern existed on one part only.
+    """
+    pts = []
+    for az in azimuths:
+        a = math.radians(az)
+        for dr in (-bolt_radial, bolt_radial):
+            for dt in (-bolt_tang / 2, bolt_tang / 2):
+                x, y = attach_r + dr, dt
+                pts.append((x * math.cos(a) - y * math.sin(a),
+                            x * math.sin(a) + y * math.cos(a)))
+    return pts
+
+
 def bulkhead(outer_dia, thickness, bore, spine_bcd, spine_holes, spine_dia,
              mount_bcd, mount_holes, insert_bcd, insert_angles, flange_width,
-             flange_thickness, wire_dia, wire_count):
+             flange_thickness, wire_dia, wire_count, leg_bolts=()):
     """Universal bay ring: carries the spine, takes the gimbal and leg brackets, passes wires.
 
     One part serves all four stations. Inserts rather than tapped plastic, because the
@@ -142,6 +161,9 @@ def bulkhead(outer_dia, thickness, bore, spine_bcd, spine_holes, spine_dia,
         a = 2 * math.pi * i / mount_holes
         x, y = mount_bcd / 2 * math.cos(a), mount_bcd / 2 * math.sin(a)
         placed.append((f"gimbal mount {i}", x, y, M3_CLEARANCE))
+        cut = cut.moveTo(x, y).circle(M3_CLEARANCE / 2)
+    for i, (x, y) in enumerate(leg_bolts):
+        placed.append((f"leg bolt {i}", x, y, M3_CLEARANCE))
         cut = cut.moveTo(x, y).circle(M3_CLEARANCE / 2)
     wire_r = (bore / 2 + outer_dia / 2) / 2
     wire_angles = place_clear_holes(wire_count, wire_r, wire_dia, placed)
@@ -248,6 +270,12 @@ def main(argv=None):
                    help="Insert angles in degrees, matching the FC mounting holes")
     p.add_argument("--flange-width", type=float, default=8.0)
     p.add_argument("--flange-thickness", type=float, default=3.0)
+    # Must match landing_gear.py: --straight-attach-r, and the bracket bolt pattern
+    # derived from --bracket-radial (0.28 of it) and --bracket-bolt-span.
+    p.add_argument("--leg-attach-r", type=float, default=34.0)
+    p.add_argument("--leg-bolt-radial", type=float, default=19.0 * 0.28)
+    p.add_argument("--leg-bolt-span", type=float, default=30.0)
+    p.add_argument("--leg-azimuths", type=str, default="0,120,240")
     p.add_argument("--wire-dia", type=float, default=9.0)
     p.add_argument("--wire-count", type=int, default=3)
     p.add_argument("--output", type=Path, default=Path("artifacts/cad"))
@@ -267,7 +295,11 @@ def main(argv=None):
     ring, walls = bulkhead(ring_od, args.bulkhead_thickness, args.bulkhead_bore,
                            args.spine_bcd, args.spine_holes, args.spine_dia,
                            args.gimbal_bcd, 6, args.insert_bcd, insert_angles,
-                           flange_w, flange_t, args.wire_dia, args.wire_count)
+                           flange_w, flange_t, args.wire_dia, args.wire_count,
+                           leg_bolt_positions(
+                               args.leg_attach_r, args.leg_bolt_radial,
+                               args.leg_bolt_span,
+                               [float(v) for v in args.leg_azimuths.split(",")]))
     parts = {
         "bulkhead": ring,
         "battery-tray": battery_tray(L, W, H, args.tray_wall,

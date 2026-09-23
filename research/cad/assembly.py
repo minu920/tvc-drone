@@ -226,6 +226,11 @@ def main(argv=None):
               "printed_kinds": len(bom),
               "printed_pieces": sum(b["count"] for b in bom),
               "printed_mass_asa_g": printed_total,
+              # Where every piece ended up, so downstream checks (bolt alignment, motion)
+              # use the same layout rather than re-deriving it and drifting from it.
+              "placements": {n: [{"xyz_mm": [round(x, 3), round(y, 3), round(z, 3)],
+                                  "rz_deg": round(rz, 3)} for (x, y, z, rz) in places]
+                             for n, places in layout.items()},
               "interference": {"pairs": clashes, "tolerance_mm3": args.clash_tol},
               "steps_with_stray_solids": stray,
               "carbon_leg_rod_total_mm": rod_len_mm,
